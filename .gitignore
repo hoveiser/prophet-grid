@@ -30,6 +30,12 @@ artifacts/
 *.webm
 *.wav
 
+# The final demo video is the one exception: reviewers need it directly in the
+# repository and bundled in the published site. Raw recordings and audio stay
+# ignored.
+!docs/demo-video-subtitled.mp4
+!frontend/public/demo-video-subtitled.mp4
+
 # OS noise
 .DS_Store
 Thumbs.db

@@ -1,3 +1,4 @@
+# Source files are always stored and checked out with LF endings.
 * text=auto eol=lf
 *.py text eol=lf
 *.ts text eol=lf
@@ -9,6 +10,9 @@
 *.yaml text eol=lf
 *.css text eol=lf
 *.html text eol=lf
+# Binary assets must never be line-ending modified. The demo video is tracked
+# as a raw byte stream so its sha256 stays identical in git, on GitHub and on
+# the published site.
 *.png binary
 *.jpg binary
 *.jpeg binary
