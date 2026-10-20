@@ -60,11 +60,15 @@ def check_secrets() -> None:
     blobs = {line.split()[0] for line in objects if len(line.split()) == 2}
     hits = 0
     for blob in blobs:
-        content = run(["git", "cat-file", "-p", blob], timeout=60).stdout
-        blob_bytes = content.encode("utf-8", "ignore")
+        content = subprocess.run(
+            ["git", "cat-file", "-p", blob],
+            cwd=str(ROOT),
+            capture_output=True,
+            timeout=60,
+        ).stdout
         for secret in secrets:
             needle = secret[2:] if secret.startswith("0x") else secret
-            if needle.encode() in blob_bytes or secret.encode() in blob_bytes:
+            if needle.encode() in content or secret.encode() in content:
                 hits += 1
     tracked = run(["git", "ls-files"]).stdout.splitlines()
     env_tracked = ".env" in tracked
