@@ -1,4 +1,4 @@
-import { Activity, BookOpen, Github, ShieldCheck, Volume2, VolumeX, Wallet } from "lucide-react";
+import { Activity, BookOpen, Clapperboard, Github, ShieldCheck, Volume2, VolumeX, Wallet } from "lucide-react";
 import { EXPLORER_URL, NETWORK_LABEL, REPO_URL } from "../config";
 import type { PlatformStats } from "../types";
 import { formatToken, shortAddress } from "../lib/format";
@@ -73,6 +73,17 @@ export function Header({
           >
             <Activity size={13} />
             <span className="font-mono">explorer</span>
+          </a>
+          <a
+            href="./demo-video-subtitled.mp4"
+            target="_blank"
+            rel="noreferrer"
+            data-testid="demo-video-link"
+            className="hidden items-center gap-1.5 rounded-lg border border-line bg-panel/60 px-2.5 py-2 text-[11px] text-muted transition hover:border-violet/40 hover:text-ink sm:flex"
+            title="Watch the subtitled demo video"
+          >
+            <Clapperboard size={13} />
+            <span className="font-mono">demo</span>
           </a>
           <a
             href={REPO_URL}

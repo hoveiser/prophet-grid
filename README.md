@@ -9,7 +9,8 @@ funded custody vault, a bonded challenge window, and exact pro rata settlement.
 | Contract (studionet) | `0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967` |
 | GenLayer explorer | https://genlayer-explorer.vercel.app/contracts/0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967 |
 | Source | https://github.com/hoveiser/prophet-grid |
-| Demo video (local build) | `docs/demo-video-subtitled.mp4` (48 s, burned in subtitles, gitignored by policy) |
+| Demo video (48 s, burned in subtitles, with audio) | https://hoveiser.github.io/prophet-grid/demo-video-subtitled.mp4 |
+| Demo video in the repository | https://github.com/hoveiser/prophet-grid/blob/main/docs/demo-video-subtitled.mp4 |
 | Evidence | `evidence/studionet_deployment.json`, `evidence/sha256_identity.json` |
 
 Tags: `Prediction Markets`, `Conditional Markets`, `Outcome Resolution`.
@@ -213,7 +214,7 @@ tools/generate_logo.py             Deterministic 512 px logo renderer
 tools/generate_soundtrack.py       48 s ambient soundtrack synthesizer
 frontend/scripts/record_demo.mjs   Playwright live UI recording
 tools/build_video.py               Subtitles, audio and compression
-docs/demo-video-subtitled.mp4      Generated demo video (gitignored)
+docs/demo-video-subtitled.mp4      Generated demo video (tracked, also served on Pages)
 evidence/                          On chain receipts and identity proofs
 ```
 

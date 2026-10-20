@@ -170,9 +170,49 @@ def check_video() -> None:
     record("Demo video", "ffprobe duration, audio stream, size", ok, f"{duration:.2f}s, {size_mb:.2f} MB, audio={has_audio}")
 
 
-def check_video_gitignored() -> None:
-    result = run(["git", "check-ignore", "-q", "docs/demo-video-subtitled.mp4"])
-    record("Video policy", "git check-ignore docs/demo-video-subtitled.mp4", result.returncode == 0, "gitignored on main")
+def check_video_policy() -> None:
+    """The final demo video must be tracked on main and served on Pages.
+
+    Raw recordings and the soundtrack stay ignored. Only the subtitled mp4 is
+    committed, in docs/ for the repository and in frontend/public/ so the build
+    publishes it next to the app.
+    """
+    tracked = set(run(["git", "ls-files"]).stdout.splitlines())
+    expected = {"docs/demo-video-subtitled.mp4", "frontend/public/demo-video-subtitled.mp4"}
+    missing = sorted(expected - tracked)
+    leftovers = sorted(path for path in ("docs/demo-raw.webm", "artifacts/soundtrack.wav") if path in tracked)
+    pending = sorted(
+        run(["git", "ls-files", "--others", "--exclude-standard", "docs", "frontend/public"]).stdout.splitlines()
+    )
+    same_bytes = (ROOT / "docs" / "demo-video-subtitled.mp4").read_bytes() == (
+        ROOT / "frontend" / "public" / "demo-video-subtitled.mp4"
+    ).read_bytes()
+    ok = not missing and not leftovers and not pending and same_bytes
+    detail = f"tracked={len(expected) - len(missing)}/2 bytes_match={same_bytes} media_left_out={len(leftovers) + len(pending)}"
+    if missing:
+        detail += f" missing={missing}"
+    if leftovers:
+        detail += f" unexpectedly tracked={leftovers}"
+    if pending:
+        detail += f" untracked files remain={pending}"
+    record("Video policy", "git ls-files and git ls-files --others --exclude-standard", ok, detail)
+
+
+def check_video_urls() -> None:
+    """Both published copies of the video must answer with HTTP 200."""
+    urls = [
+        "https://github.com/hoveiser/prophet-grid/raw/main/docs/demo-video-subtitled.mp4",
+        f"{PAGES_URL}demo-video-subtitled.mp4",
+    ]
+    statuses = []
+    for url in urls:
+        try:
+            response = requests.get(url, timeout=45, allow_redirects=True)
+            statuses.append(response.status_code)
+        except requests.RequestException:
+            statuses.append(0)
+    ok = all(status == 200 for status in statuses)
+    record("Video URLs", "GET the repo raw file and the Pages copy", ok, f"statuses={statuses}")
 
 
 def check_chain_views() -> None:
@@ -217,7 +257,8 @@ def main() -> int:
     check_chain_views()
     check_pages()
     check_video()
-    check_video_gitignored()
+    check_video_policy()
+    check_video_urls()
 
     width = max(len(name) for name, _, _ in results)
     print(f"{'CHECK'.ljust(width)} | RESULT")
