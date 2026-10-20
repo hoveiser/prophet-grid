@@ -15,6 +15,18 @@ jobs:
           python-version: "3.12"
       - name: Install toolchain
         run: pip install genvm-linter genlayer-test pytest
+      - name: Cache GenVM runner bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/genvm-linter
+            ~/.cache/gltest-direct
+          key: genvm-runner-v0.3.0-rc7
+      - name: Prime the direct test SDK cache
+        run: |
+          genvm-lint download --version v0.3.0-rc7
+          mkdir -p "$HOME/.cache/gltest-direct"
+          cp "$HOME/.cache/genvm-linter/genvm-universal-v0.3.0-rc7.tar.xz" "$HOME/.cache/gltest-direct/"
       - name: Lint and validate
         run: genvm-lint check contracts/prophet_grid.py
       - name: Direct tests
