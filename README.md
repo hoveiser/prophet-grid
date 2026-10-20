@@ -260,6 +260,9 @@ cd .. && .venv/bin/python tools/build_video.py
 | Network | studionet (chain 61999) |
 | Contract | `0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967` |
 | Deployer | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` |
+| Deploy transaction | `0x1045f704e34e1ec8bf1b5248a570564c494eaa78bf8efbf036ae21da393980e7` |
+| Contract commit | `1af7288fb56ef8e5106dbab92fd2cfec5009ff50` |
+| Tag | `studionet-v1` |
 | Runner pin | `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` |
 | Challenge window | 2 clock steps |
 | Challenge bond | 50 PGT |
@@ -351,6 +354,12 @@ Local equals git: yes. Local equals on chain: yes. All four equal: yes.
   the market stays open. This is intentional: a malformed model response must
   never settle a market.
 - The frontend caches nothing; every refresh is three live RPC calls.
+- The adversarial review in `docs/adversarial-review.md` records three open
+  liveness findings: a permissionless clock can close a challenge window early,
+  a winning side with zero shares leaves its pot locked, and an OPEN market has
+  no refund fallback if consensus never resolves. None of them can pay the wrong
+  party. The remediation for each is documented in the review and needs a next
+  contract version.
 
 ## License
 

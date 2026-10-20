@@ -65,7 +65,7 @@ try {
   console.log("loading", baseUrl);
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 90000 });
   await page.waitForSelector('[data-testid="market-card-1"]', { timeout: 90000 });
-  await beat(3200);
+  await beat(2600);
 
   await page.hover('[data-testid="invariant-badge"]');
   await beat(900);
@@ -75,7 +75,7 @@ try {
   await beat(1600);
   await smoothClick(page, page.getByRole("button", { name: /consensus receipt/ }));
   await page.waitForSelector('[data-testid="consensus-drawer"]', { timeout: 30000 });
-  await beat(2600);
+  await beat(2200);
   await smoothClick(page, page.locator('[data-testid="consensus-drawer"] button[aria-label="Close"]'));
   await beat(900);
 
@@ -94,6 +94,8 @@ try {
   await stake.click({ position: { x: 40, y: 2 } });
   await beat(800);
   await stake.click({ position: { x: 230, y: 2 } });
+  await beat(1200);
+  await page.mouse.wheel(0, 360);
   await beat(2200);
 
   // Security guard lab: dry run then one live revert.
@@ -103,14 +105,15 @@ try {
   await beat(1600);
   await smoothClick(page, page.locator('[data-testid="guard-live-premature"]'));
   await page.waitForSelector('[data-testid="guard-result-premature"]', { timeout: 150000 });
-  await beat(2600);
+  await page.getByText("REVERT CONFIRMED").first().waitFor({ timeout: 30000 });
+  await beat(2200);
 
   // Wallet: mint collateral on the demo identity.
   await smoothClick(page, page.locator('[data-testid="tab-wallet"]'));
   await beat(1200);
   await smoothClick(page, page.locator('[data-testid="mint-button"]'));
-  await page.waitForSelector('[data-testid="toast"]', { timeout: 120000 });
-  await beat(2000);
+  await page.getByText("1000 PGT minted").first().waitFor({ timeout: 150000 });
+  await beat(1800);
 
   // Switch identity to a fresh burner and back.
   await smoothClick(page, page.getByRole("button", { name: /Burner Bravo/ }));
@@ -126,14 +129,16 @@ try {
   await page.fill('input[aria-label="trade amount"]', "50");
   await beat(600);
   await smoothClick(page, page.getByRole("button", { name: /^Buy YES$/ }));
-  await page.waitForSelector('[data-testid="toast"]', { timeout: 120000 });
-  await beat(2400);
+  await page.getByText("buy_outcome_shares confirmed").first().waitFor({ timeout: 150000 });
+  await beat(2000);
 
   // Closing shot on the simulator and the hero.
   await smoothClick(page, page.locator('[data-testid="tab-whatif"]'));
-  await beat(1500);
+  await beat(1200);
+  await page.mouse.wheel(0, 320);
+  await beat(1400);
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: "smooth" }));
-  await beat(2600);
+  await beat(2400);
 } catch (error) {
   console.log("recording step failed:", error instanceof Error ? error.message : String(error));
 } finally {

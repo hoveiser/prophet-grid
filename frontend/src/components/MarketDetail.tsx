@@ -57,6 +57,7 @@ export function MarketDetail({
   }
 
   const tone = marketStatusTone(market);
+  const hasVerdict = market.provisional_outcome !== "";
   const isOpen = market.status === "OPEN";
   const isProvisional = market.status === "PROVISIONAL";
   const isChallenged = market.status === "CHALLENGED";
@@ -122,7 +123,7 @@ export function MarketDetail({
         </div>
         <div className="space-y-2">
           <Step done label={`Market created at step ${market.created_at_step}`} />
-          <Step done={market.resolved_at_step > 0} label={market.resolved_at_step > 0 ? `Verdict ${outcomeLabel(market.provisional_outcome)} at step ${market.resolved_at_step}, confidence anchor ${market.confidence_anchor}` : "Awaiting live resolution"} />
+          <Step done={hasVerdict} label={hasVerdict ? `Verdict ${outcomeLabel(market.provisional_outcome)} at step ${market.resolved_at_step}, confidence anchor ${market.confidence_anchor}` : "Awaiting live resolution"} />
           <Step
             done={market.challenge_deadline_step > 0 && !market.challenge_open}
             active={market.challenge_open || isChallenged}

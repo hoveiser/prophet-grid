@@ -1,49 +1,49 @@
 1
-00:00:00,400 --> 00:00:04,600
+00:00:00,400 --> 00:00:04,000
 ProphetGrid: conditional macro and tech markets,
 adjudicated by validators instead of an admin key.
 
 2
-00:00:04,900 --> 00:00:09,200
-Every pool unit sits in an on-chain custody vault,
-so no operator can move trader collateral.
+00:00:04,200 --> 00:00:08,400
+Every market carries a primary source,
+literal criteria and a funded custody vault.
 
 3
-00:00:09,500 --> 00:00:13,800
-Markets resolve only through live consensus
-over the primary source and the filed evidence.
+00:00:08,600 --> 00:00:12,000
+The consensus inspector exposes the comparative
+principle and the five anchor confidence ladder.
 
 4
-00:00:14,100 --> 00:00:18,400
-The What-If simulator shows implied odds,
-pro rata payout, ROI and exact dust conservation.
+00:00:12,200 --> 00:00:16,400
+The What-If simulator shows implied odds, payout,
+ROI and exact dust conservation.
 
 5
-00:00:18,700 --> 00:00:23,000
-Confidence is quantized to five anchors.
-Validators must agree exactly on the band.
+00:00:16,600 --> 00:00:21,600
+The guard lab mirrors each revert rule,
+then sends a real transaction.
 
 6
-00:00:23,300 --> 00:00:27,600
-Evidence is sanitized: tags defused, brackets stripped,
-text truncated before it reaches the prompt.
+00:00:21,800 --> 00:00:25,500
+A premature claim is refused on chain
+while the challenge window is open.
 
 7
-00:00:27,900 --> 00:00:32,200
-The Security Guard Lab triggers a real revert:
-a premature claim is refused on chain.
+00:00:25,700 --> 00:00:31,500
+Mint test collateral on a burner wallet
+and switch identity in one click.
 
 8
-00:00:32,500 --> 00:00:36,800
-Pots and challenge bonds stay reserved
-until the challenge window closes.
+00:00:31,700 --> 00:00:36,400
+Every trade moves collateral into the vault,
+never into an operator wallet.
 
 9
-00:00:37,100 --> 00:00:41,400
-Switch burner identities, mint test collateral
-and trade YES or NO shares.
+00:00:36,600 --> 00:00:42,400
+Buy YES shares on an open market.
+The trade settles through the same vault.
 
 10
-00:00:41,700 --> 00:00:46,900
-Payouts are exact. Rounding dust goes to the last
-claimant, so the vault balances to zero.
+00:00:42,600 --> 00:00:47,200
+Four way sha256 identity binds the source,
+the git blob, GitHub and the chain.

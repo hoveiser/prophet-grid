@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,6 +12,25 @@ README = ROOT / "README.md"
 EVIDENCE = ROOT / "evidence" / "studionet_deployment.json"
 START = "<!-- EVIDENCE:START -->"
 END = "<!-- EVIDENCE:END -->"
+
+
+def tracked_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--", "contracts/prophet_grid.py"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def deploy_tx(data: dict) -> str:
+    for item in data.get("transactions", []):
+        if item.get("step") == "deploy" and item.get("tx_hash"):
+            return str(item["tx_hash"])
+    return "unknown"
 
 
 def yes(value: bool) -> str:
@@ -39,6 +59,9 @@ def main() -> int:
     lines.append(f"| Network | studionet (chain {data.get('chain_id')}) |")
     lines.append(f"| Contract | `{data.get('contract_address')}` |")
     lines.append(f"| Deployer | `{data.get('deployer')}` |")
+    lines.append(f"| Deploy transaction | `{deploy_tx(data)}` |")
+    lines.append(f"| Contract commit | `{tracked_commit()}` |")
+    lines.append("| Tag | `studionet-v1` |")
     lines.append(f"| Runner pin | `{data.get('runner_pin')}` |")
     lines.append(f"| Challenge window | {data.get('challenge_window_steps')} clock steps |")
     lines.append(f"| Challenge bond | {data.get('challenge_bond_amount')} PGT |")

@@ -20,8 +20,8 @@ OUTPUT = ROOT / "docs" / "demo-video-subtitled.mp4"
 TARGET_SECONDS = 48.0
 
 STYLE = (
-    "FontName=DejaVu Sans,FontSize=20,PrimaryColour=&H00FFFFFF,"
-    "BackColour=&HB4070B14,BorderStyle=3,Outline=1,Shadow=0,MarginV=22,Bold=1"
+    "FontName=DejaVu Sans,FontSize=14,PrimaryColour=&H00FFFFFF,"
+    "BackColour=&HB4070B14,BorderStyle=3,Outline=1,Shadow=0,MarginV=18,Bold=1"
 )
 
 
