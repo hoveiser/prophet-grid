@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-10-20T10:48:23+00:00",
+  "repository": "https://github.com/hoveiser/prophet-grid",
+  "branch": "main",
+  "commit": "4a0b51fe6d1b85c330ccf60641f9def6436d595a",
+  "tag": "studionet-v1",
+  "pages_branch": "gh-pages",
+  "pages_status": "built",
+  "pages_url": "https://hoveiser.github.io/prophet-grid/",
+  "site": {
+    "status": 200,
+    "asset_status": 200,
+    "asset": "/prophet-grid/assets/index-D5f5gJof.js",
+    "attempts": 1
+  },
+  "default_branch": "main",
+  "visibility": "public"
+}

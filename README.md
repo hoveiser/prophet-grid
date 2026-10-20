@@ -316,9 +316,9 @@ total_paid_out             = 1090
 | Local LF file | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
 | Git blob | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
 | On chain code | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
-| GitHub raw file | `None` | None |
+| GitHub raw file | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
 
-Local equals git: yes. Local equals on chain: yes. All four equal: no.
+Local equals git: yes. Local equals on chain: yes. All four equal: yes.
 
 ### Local verification recorded with the evidence
 

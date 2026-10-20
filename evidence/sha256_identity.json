@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-10-20T10:48:40+00:00",
+  "contract_address": "0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967",
+  "network": "studionet",
+  "chain_id": 61999,
+  "local_lf_sha256": "186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d",
+  "local_lf_bytes": 69073,
+  "git_blob_sha256": "186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d",
+  "git_blob_bytes": 69073,
+  "git_blob_object": "52db3299b4f27cc7cc7b080e1c3c9fa0d983845d",
+  "onchain_sha256": "186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d",
+  "onchain_bytes": 69073,
+  "remote_github_sha256": "186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d",
+  "remote_github_bytes": 69073,
+  "match_local_git": true,
+  "match_local_onchain": true,
+  "match_local_remote": true,
+  "match_all_four": true
+}
