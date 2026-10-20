@@ -209,17 +209,28 @@ def enable_pages(api: GitHub) -> dict:
     status, body = api.call("GET", f"/repos/{OWNER}/{REPO}/pages")
     if status == 404:
         status, body = api.call("POST", f"/repos/{OWNER}/{REPO}/pages", payload)
-        if status not in (200, 201):
+        if status in (200, 201):
+            log("GitHub Pages enabled")
+            return body
+        if status != 409:
             raise RuntimeError(f"pages creation failed with status {status}: {body.get('message')}")
-        log("GitHub Pages enabled")
-        return body
-    if status != 200:
+        log("GitHub Pages was already enabled, reading its configuration")
+        status, body = api.call("GET", f"/repos/{OWNER}/{REPO}/pages")
+        if status != 200:
+            raise RuntimeError(f"pages lookup failed with status {status}")
+    elif status != 200:
         raise RuntimeError(f"pages lookup failed with status {status}")
-    status, body = api.call("PUT", f"/repos/{OWNER}/{REPO}/pages", payload)
+
+    source = body.get("source") or {}
+    if source.get("branch") == "gh-pages":
+        log("GitHub Pages already points at gh-pages")
+        return body
+
+    status, updated = api.call("PUT", f"/repos/{OWNER}/{REPO}/pages", payload)
     if status not in (200, 204):
-        raise RuntimeError(f"pages update failed with status {status}: {body.get('message')}")
+        raise RuntimeError(f"pages update failed with status {status}: {updated.get('message')}")
     log("GitHub Pages source set to gh-pages")
-    return body
+    return updated or body
 
 
 def verify_site(timeout: int = 600) -> dict:
