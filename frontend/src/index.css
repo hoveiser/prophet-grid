@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-obsidian text-ink antialiased;
+  background-image:
+    radial-gradient(900px 520px at 12% -10%, rgba(52, 211, 153, 0.08), transparent 62%),
+    radial-gradient(820px 440px at 88% -4%, rgba(34, 211, 238, 0.07), transparent 60%),
+    linear-gradient(rgba(27, 39, 64, 0.28) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27, 39, 64, 0.28) 1px, transparent 1px);
+  background-size: auto, auto, 34px 34px, 34px 34px;
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgba(52, 211, 153, 0.28);
+  color: #e6edf7;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: #070b14;
+}
+*::-webkit-scrollbar-thumb {
+  background: #1b2740;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #2a3b5c;
+}
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: #16213a;
+  outline: none;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #34d399;
+  border: 2px solid #070b14;
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.55);
+}
+
+.slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #34d399;
+  border: 2px solid #070b14;
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.55);
+}
+
+.slider-no::-webkit-slider-thumb {
+  background: #22d3ee;
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.55);
+}
+.slider-no::-moz-range-thumb {
+  background: #22d3ee;
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.55);
+}
+
+.slider-amber::-webkit-slider-thumb {
+  background: #fbbf24;
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.55);
+}
+.slider-amber::-moz-range-thumb {
+  background: #fbbf24;
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.55);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
