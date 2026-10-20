@@ -96,10 +96,24 @@ def git(*args: str, token: str, check: bool = True) -> subprocess.CompletedProce
         f"user.name={COMMIT_NAME}",
         "-c",
         f"user.email={COMMIT_EMAIL}",
-        "-c",
-        f"credential.helper=!{HELPER}",
-    ]
+    ] + helper_args()
     return run(base + list(args), token, check=check)
+
+
+def helper_args() -> list[str]:
+    """Force authentication through the token in the environment only.
+
+    Both helper lists are reset first, so an ambient per host helper on the
+    machine cannot answer for a push that is supposed to use GITHUB_TOKEN.
+    """
+    return [
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.https://github.com.helper=",
+        "-c",
+        f"credential.https://github.com.helper=!{HELPER}",
+    ]
 
 
 def ensure_repo(api: GitHub) -> dict:
@@ -193,7 +207,7 @@ def publish_pages(token: str) -> str:
             "Deploy ProphetGrid frontend to GitHub Pages",
         ],
         ["git", "remote", "add", "origin", f"https://github.com/{OWNER}/{REPO}.git"],
-        ["git", "-c", f"credential.helper=!{HELPER}", "push", "--force", "origin", "gh-pages"],
+        ["git", *helper_args(), "push", "--force", "origin", "gh-pages"],
     ]
     for command in commands:
         result = subprocess.run(command, cwd=str(PAGES_WORKTREE), env=env, capture_output=True, text=True)
