@@ -7,10 +7,9 @@ import {
   Clock3,
   Gavel,
   Lock,
-  RefreshCcw,
   ScanSearch,
   ShieldAlert,
-  Timer,
+  TimerReset,
 } from "lucide-react";
 import type { Market, Position } from "../types";
 import { formatBps, formatExact, marketStatusTone, outcomeLabel, outcomeTone } from "../lib/format";
@@ -21,13 +20,15 @@ interface MarketDetailProps {
   busy: string | null;
   onBuy: (side: "YES" | "NO", amount: number) => void;
   onClaim: () => void;
+  onClaimRefund: () => void;
+  onExpire: () => void;
   onChallenge: (url: string) => void;
-  onAudit: () => void;
   onResolve: (url: string) => void;
   onFinalize: () => void;
-  onTick: () => void;
   onInspect: () => void;
 }
+
+const REFUND_STATUSES = ["REFUNDABLE_ZERO_WINNERS", "EXPIRED"];
 
 export function MarketDetail({
   market,
@@ -35,11 +36,11 @@ export function MarketDetail({
   busy,
   onBuy,
   onClaim,
+  onClaimRefund,
+  onExpire,
   onChallenge,
-  onAudit,
   onResolve,
   onFinalize,
-  onTick,
   onInspect,
 }: MarketDetailProps) {
   const [amount, setAmount] = useState(50);
@@ -59,10 +60,17 @@ export function MarketDetail({
   const tone = marketStatusTone(market);
   const hasVerdict = market.provisional_outcome !== "";
   const isOpen = market.status === "OPEN";
-  const isProvisional = market.status === "PROVISIONAL";
-  const isChallenged = market.status === "CHALLENGED";
+  const inChallengeWindow = market.status === "CHALLENGE_WINDOW";
   const isFinalized = market.status === "FINALIZED";
-  const canClaim = isFinalized && Boolean(position) && position?.payout_quote !== undefined && (position?.payout_quote ?? 0) > 0;
+  const isRefundable = REFUND_STATUSES.includes(market.status);
+  const canPropose = isOpen && market.current_epoch >= market.close_epoch && market.current_epoch < market.resolution_timeout_epoch;
+  const canClaim = isFinalized && Boolean(position) && position?.claim_path === "claim_market_payout" && (position?.payout_quote ?? 0) > 0 && position?.claimable;
+  const canClaimRefund = isRefundable && Boolean(position) && (position?.payout_quote ?? 0) > 0 && position?.claimable;
+  const windowSecondsLeft = market.countdown_epochs * 60;
+  const countdownLabel =
+    market.countdown_epochs > 0
+      ? `${market.countdown_epochs} epoch${market.countdown_epochs === 1 ? "" : "s"} (~${Math.max(1, Math.round(windowSecondsLeft / 60))} min) left`
+      : "elapsed";
 
   return (
     <div className="space-y-3" data-testid="market-detail">
@@ -119,23 +127,49 @@ export function MarketDetail({
 
       <div className="rounded-xl border border-line bg-panel/80 p-4">
         <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted">
-          <Clock3 size={12} /> settlement timeline
+          <Clock3 size={12} /> objective timeline (epochs are 60s of block time)
         </div>
         <div className="space-y-2">
-          <Step done label={`Market created at step ${market.created_at_step}`} />
-          <Step done={hasVerdict} label={hasVerdict ? `Verdict ${outcomeLabel(market.provisional_outcome)} at step ${market.resolved_at_step}, confidence anchor ${market.confidence_anchor}` : "Awaiting live resolution"} />
+          <Step done label={`Created at epoch ${market.created_at_epoch}, closes at epoch ${market.close_epoch}`} />
           <Step
-            done={market.challenge_deadline_step > 0 && !market.challenge_open}
-            active={market.challenge_open || isChallenged}
+            done={hasVerdict}
+            active={isOpen && market.current_epoch >= market.close_epoch}
             label={
-              market.status === "CHALLENGED"
-                ? `Re-audit pending, bond ${formatExact(market.challenge_bond_locked)} locked`
-                : market.challenge_deadline_step > 0
-                  ? `Challenge window closes at step ${market.challenge_deadline_step} (${market.countdown_steps} left)`
+              hasVerdict
+                ? `Verdict ${outcomeLabel(market.provisional_outcome)} at epoch ${market.resolved_at_epoch}, confidence anchor ${market.confidence_anchor}`
+                : market.current_epoch >= market.resolution_timeout_epoch
+                  ? `Resolution timeout reached at epoch ${market.resolution_timeout_epoch}. Expire and refund is available.`
+                  : market.current_epoch >= market.close_epoch
+                    ? "Close epoch reached. Anyone may propose resolution."
+                    : "Awaiting the objective close epoch. Early resolution reverts."
+            }
+          />
+          <Step
+            done={market.challenge_deadline_epoch > 0 && !market.challenge_open}
+            active={inChallengeWindow && market.challenge_open}
+            label={
+              inChallengeWindow
+                ? market.challenge_open
+                  ? `Challenge window open until epoch ${market.challenge_deadline_epoch}. Countdown: ${countdownLabel}`
+                  : `Challenge window elapsed. Finalize is legal from epoch ${market.challenge_deadline_epoch + 1}.`
+                : market.challenge_deadline_epoch > 0
+                  ? `Challenge window elapsed at epoch ${market.challenge_deadline_epoch}`
                   : "Challenge window not open"
             }
           />
-          <Step done={isFinalized} active={market.settlement_ready && !isFinalized} label={isFinalized ? `Settled at step ${market.finalized_at_step}` : "Claims locked until the window closes"} />
+          <Step
+            done={isFinalized || isRefundable}
+            active={market.settlement_ready || isRefundable}
+            label={
+              isFinalized
+                ? `Settled at epoch ${market.finalized_at_epoch}`
+                : market.status === "REFUNDABLE_ZERO_WINNERS"
+                  ? "Zero winning stake on the resolved side. Full principal refunds are open."
+                  : market.status === "EXPIRED"
+                    ? "Market expired unresolved. Full principal refunds are open."
+                    : "Claims locked until the challenge window strictly elapses"
+            }
+          />
         </div>
       </div>
 
@@ -151,7 +185,7 @@ export function MarketDetail({
           )}
         </div>
 
-        {isOpen ? (
+        {isOpen && market.trading_open ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <input
@@ -183,12 +217,27 @@ export function MarketDetail({
           </div>
         ) : null}
 
-        {isProvisional ? (
+        {isOpen && market.expiry_ready ? (
           <div className="space-y-2">
-            <div className="rounded border border-amber/25 bg-amber/5 px-2 py-1.5 text-[10px] text-amber">
-              {market.claim_block_reason === "CHALLENGE_WINDOW_OPEN"
-                ? `Pot and bonds stay locked for ${market.countdown_steps} more steps.`
-                : "Window closed, finalize to open claims."}
+            <div className="rounded border border-danger/25 bg-danger/5 px-2 py-1.5 text-[10px] text-danger">
+              Unresolved past epoch {market.resolution_timeout_epoch}. Any participant can expire it for a full refund.
+            </div>
+            <button
+              onClick={onExpire}
+              disabled={busy !== null}
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] font-medium text-danger transition hover:bg-danger/20 disabled:opacity-40"
+            >
+              <TimerReset size={12} /> Expire market and unlock refunds
+            </button>
+          </div>
+        ) : null}
+
+        {inChallengeWindow ? (
+          <div className="space-y-2">
+            <div className="rounded border border-amber/25 bg-amber/5 px-2 py-1.5 text-[10px] text-amber" data-testid="challenge-countdown">
+              {market.challenge_open
+                ? `Custody locked. Challenge window closes after epoch ${market.challenge_deadline_epoch}. ${countdownLabel}.`
+                : "Window elapsed. Finalize to release claims."}
             </div>
             <input
               value={counterUrl}
@@ -202,7 +251,7 @@ export function MarketDetail({
                 disabled={busy !== null || !market.challenge_open}
                 className="flex items-center justify-center gap-1.5 rounded-lg border border-amber/40 bg-amber/10 px-2 py-2 text-[10.5px] font-medium text-amber transition hover:bg-amber/20 disabled:opacity-40"
               >
-                <Gavel size={12} /> File challenge
+                <Gavel size={12} /> Challenge (bond {formatExact(50)})
               </button>
               <button
                 onClick={onClaim}
@@ -224,16 +273,6 @@ export function MarketDetail({
           </div>
         ) : null}
 
-        {isChallenged ? (
-          <button
-            onClick={onAudit}
-            disabled={busy !== null}
-            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-orange-400/40 bg-orange-400/10 px-3 py-2 text-[11px] font-medium text-orange-300 transition hover:bg-orange-400/20 disabled:opacity-40"
-          >
-            <RefreshCcw size={12} /> Run re-audit consensus
-          </button>
-        ) : null}
-
         {isFinalized ? (
           <button
             onClick={onClaim}
@@ -241,6 +280,22 @@ export function MarketDetail({
             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-yes/40 bg-yes/10 px-3 py-2 text-[11px] font-medium text-yes transition hover:bg-yes/20 disabled:opacity-40"
           >
             <ArrowDownToLine size={12} /> {canClaim ? `Claim ${formatExact(position?.payout_quote ?? 0)} PGT` : "Nothing to claim"}
+          </button>
+        ) : null}
+
+        {isRefundable ? (
+          <button
+            onClick={onClaimRefund}
+            disabled={busy !== null || !canClaimRefund}
+            data-testid="claim-refund-button"
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-orange-400/40 bg-orange-400/10 px-3 py-2 text-[11px] font-medium text-orange-300 transition hover:bg-orange-400/20 disabled:opacity-40"
+          >
+            <ArrowDownToLine size={12} />{" "}
+            {canClaimRefund
+              ? `Claim ${formatExact(position?.payout_quote ?? 0)} PGT refund (100% principal)`
+              : market.status === "REFUNDABLE_ZERO_WINNERS"
+                ? "Zero winner refunds open: participants claim here"
+                : "Timeout refunds open: participants claim here"}
           </button>
         ) : null}
       </div>
@@ -258,8 +313,8 @@ export function MarketDetail({
         {operatorOpen ? (
           <div className="space-y-2 border-t border-line px-4 py-3">
             <p className="text-[9.5px] leading-relaxed text-muted">
-              No owner key exists. Any account may resolve, challenge, audit, advance the clock or finalize.
-              Each action still passes the same on-chain guards.
+              No owner key and no advanceable clock exist. Epochs follow objective block time. Any account may
+              propose, challenge, finalize, expire or claim refunds once the on-chain guards allow it.
             </p>
             <input
               value={evidenceUrl}
@@ -267,22 +322,19 @@ export function MarketDetail({
               className="w-full rounded-md border border-line bg-obsidian/70 px-2 py-1.5 font-mono text-[10px] text-ink outline-none focus:border-yes/50"
               aria-label="resolution evidence url"
             />
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => onResolve(evidenceUrl)}
-                disabled={busy !== null || !isOpen}
-                className="rounded-lg border border-line bg-obsidian/60 px-2 py-1.5 text-[10px] text-ink transition hover:border-no/40 disabled:opacity-40"
-              >
-                Live resolve
-              </button>
-              <button
-                onClick={onTick}
-                disabled={busy !== null}
-                className="flex items-center justify-center gap-1 rounded-lg border border-line bg-obsidian/60 px-2 py-1.5 text-[10px] text-ink transition hover:border-amber/40 disabled:opacity-40"
-              >
-                <Timer size={11} /> Advance clock
-              </button>
-            </div>
+            <button
+              onClick={() => onResolve(evidenceUrl)}
+              disabled={busy !== null || !canPropose}
+              className="w-full rounded-lg border border-line bg-obsidian/60 px-2 py-1.5 text-[10px] text-ink transition hover:border-no/40 disabled:opacity-40"
+            >
+              {isOpen
+                ? canPropose
+                  ? "Propose live resolution"
+                  : market.current_epoch < market.close_epoch
+                    ? "Resolution blocked until close epoch"
+                    : "Resolution timeout passed"
+                : "Already resolved"}
+            </button>
             <div className="font-mono text-[9px] text-muted">
               implied YES {formatBps(market.implied_yes_prob_bps)} | digest {market.evidence_digest ? `${market.evidence_digest.slice(0, 18)}...` : "none"}
             </div>

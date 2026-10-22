@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Deploy ProphetGrid to GenLayer studionet and run the funded scenario.
+"""Deploy the hardened ProphetGrid v2 contract to studionet and drive it live.
+
+v2 remediation coverage for the Steward rejection:
+- premature resolution before the objective close epoch is probed on chain and
+  must revert (guard:early_resolution),
+- caller side clock manipulation is probed and must revert
+  (guard:advance_clock),
+- finalize and claim probes before the challenge window elapses revert,
+- a bond backed challenge re-runs live consensus and restarts the window,
+- a zero winner market finalizes as REFUNDABLE_ZERO_WINNERS and refunds every
+  principal through claim_refund,
+- an abandoned market passes its resolution timeout, is expired by a
+  participant and refunds 100 percent of the stakes.
 
 The script is idempotent: every step is written to a checkpoint file and
 skipped on the next run. It records transaction hashes, consensus results,
@@ -40,20 +52,33 @@ ARTIFACTS = ROOT / "artifacts"
 
 RPC_URL = "https://studio.genlayer.com/api"
 CHAIN_ID = 61999
-WINDOW = 2
+WINDOW = 10
 BOND = 50
+GRACE = 24
+EPOCH_SECONDS = 60
 BURNER_FUND_WEI = 2 * 10**18
 POLITE_DELAY = 2.0
+POLL_DELAY = 15.0
+WAIT_LIMIT_SECONDS = 2400
 TERMINAL_STATUSES = ("FINALIZED", "CANCELED", "UNDETERMINED")
 GUARD_EXPECTATIONS = {
-    "guard:premature_claim": "CHALLENGE_WINDOW_OPEN",
+    "guard:advance_clock": "advance_market_clock is removed",
+    "guard:early_resolution": "objective close epoch",
+    "guard:early_trading": "trading window is closed",
+    "guard:early_finalize": "CHALLENGE_WINDOW_OPEN",
+    "guard:early_claim": "CHALLENGE_WINDOW_OPEN",
+    "guard:early_expiry": "resolution grace period",
+    "guard:post_timeout_proposal": "resolution timeout elapsed",
     "guard:losing_claim": "no winning shares",
     "guard:double_claim": "already claimed",
+    "guard:double_refund": "already claimed",
+    "guard:refund_wrong_status": "no refund to claim",
 }
 
 MARKETS = [
     {
         "key": "eth_blob",
+        "duration": 22,
         "question": "Did EIP-7691 raise the Ethereum blob target to 6 and the maximum to 9 per block?",
         "category": "TECH",
         "primary": "https://eips.ethereum.org/EIPS/eip-7691",
@@ -66,6 +91,7 @@ MARKETS = [
     },
     {
         "key": "ai_sdk",
+        "duration": 22,
         "question": "Does the official openai python package metadata link to its GitHub repository?",
         "category": "AI",
         "primary": "https://pypi.org/pypi/openai/json",
@@ -78,6 +104,7 @@ MARKETS = [
     },
     {
         "key": "macro_gdp",
+        "duration": 22,
         "question": "Is the latest World Bank US GDP observation above 20 trillion US dollars?",
         "category": "MACRO",
         "primary": "https://api.worldbank.org/v2/country/USA/indicator/NY.GDP.MKTP.CD?format=json&per_page=3",
@@ -86,6 +113,19 @@ MARKETS = [
         "criteria": (
             "Resolve YES when the most recent annual US GDP value in the World Bank API is "
             "greater than 20000000000000 USD. Resolve NO when it is at or below that value."
+        ),
+    },
+    {
+        "key": "abandoned",
+        "duration": 22,
+        "question": "Will the demo abandoned market ever receive a consensus resolution proposal?",
+        "category": "OTHER",
+        "primary": "https://eips.ethereum.org/EIPS/eip-1",
+        "evidence": "https://eips.ethereum.org/EIPS/eip-1",
+        "counter": "https://eips.ethereum.org/EIPS/eip-1",
+        "criteria": (
+            "Resolve YES only when an Ethereum Improvement Proposal number one document "
+            "explicitly lists this market question as resolved. NO otherwise."
         ),
     },
 ]
@@ -127,12 +167,25 @@ def log(message: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
 
 
+def wall_epoch() -> int:
+    return int(time.time()) // EPOCH_SECONDS
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def normalize_lf(data: bytes) -> bytes:
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def venv_exe(name: str) -> str:
+    scripts = ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    candidate = scripts / name
+    if os.name == "nt" and not str(candidate).endswith((".exe", ".cmd", ".bat")):
+        if Path(str(candidate) + ".exe").exists():
+            candidate = Path(str(candidate) + ".exe")
+    return str(candidate)
 
 
 def load_json(path: Path, default):
@@ -151,6 +204,16 @@ def save_json(path: Path, payload) -> None:
     with open(temp, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
         handle.write("\n")
+    # On Windows a concurrent reader or a antivirus scan can hold the
+    # destination for a moment and os.replace raises PermissionError. The
+    # checkpoint write is not consensus critical, so retry briefly instead
+    # of aborting a multi hour live scenario.
+    for attempt in range(10):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            time.sleep(0.5 * (attempt + 1))
     os.replace(temp, path)
 
 
@@ -298,7 +361,7 @@ class Runner:
             return entry
         signer = account or self.main
 
-        attempts = 3 if function_name in ("resolve_market_live", "audit_resolution_challenge") else 1
+        attempts = 3 if function_name in ("propose_resolution", "challenge_resolution", "finalize_market") else 1
         last_entry = None
         for attempt in range(1, attempts + 1):
             log(f"write {key} -> {function_name} as {signer.address[:10]} (attempt {attempt}/{attempts})")
@@ -372,60 +435,129 @@ class Runner:
         return with_retries(call, f"read {function_name}")
 
     # ------------------------------------------------------------------
+    # Objective time waiting. The contract clock is the chain datetime; the
+    # only way to move past a deadline is to wait for real block time.
+    # ------------------------------------------------------------------
+
+    def wait_for_epoch(self, label: str, target_epoch: int) -> None:
+        started = time.time()
+        while True:
+            state = self.read_json("get_platform_stats")
+            current = int(state.get("current_epoch") or 0)
+            if current >= target_epoch or wall_epoch() >= target_epoch:
+                log(f"{label}: reached epoch {max(current, target_epoch)}")
+                return
+            if time.time() - started > WAIT_LIMIT_SECONDS:
+                raise StepFailed(f"{label}: stuck at epoch {current}, target {target_epoch}")
+            time.sleep(POLL_DELAY)
+
+    def wait_market_window(self, market_key: str, market_id: int) -> None:
+        """Wait until finalize becomes legal: current_epoch > challenge_deadline_epoch."""
+        state = self.read_json("get_market", [market_id])
+        if state.get("status") in ("FINALIZED", "REFUNDABLE_ZERO_WINNERS", "EXPIRED"):
+            return
+        deadline = int(state.get("challenge_deadline_epoch") or 0)
+        self.wait_for_epoch(f"{market_key} challenge window", deadline + 1)
+        time.sleep(POLL_DELAY)
+
+    # ------------------------------------------------------------------
     # Steps
     # ------------------------------------------------------------------
 
-    def close_window(self, market_key: str, market_id: int) -> None:
-        """Advance the clock until the market challenge window is closed."""
+    def finalize_when_ready(self, market_key: str, market_id: int) -> dict:
         state = self.read_json("get_market", [market_id])
-        if state.get("status") == "FINALIZED":
-            return
-        if state.get("status") == "CHALLENGED":
-            self.write(
-                f"audit:{market_key}",
-                self.address,
-                "audit_resolution_challenge",
-                [market_id],
-                account=self.burners["carol"],
-            )
-            state = self.read_json("get_market", [market_id])
-        deadline = int(state.get("challenge_deadline_step") or 0)
-        now = int(state.get("clock_step") or 0)
-        if now < deadline:
-            self.write(
-                f"clock:to:{deadline}",
-                self.address,
-                "advance_market_clock",
-                [deadline - now],
-                account=self.main,
-            )
-
-    def finalize_if_needed(self, market_key: str, market_id: int) -> None:
-        state = self.read_json("get_market", [market_id])
-        if state.get("status") == "FINALIZED":
-            log(f"market {market_key} already finalized")
-            return
-        self.close_window(market_key, market_id)
+        if state.get("status") in ("FINALIZED", "REFUNDABLE_ZERO_WINNERS"):
+            log(f"market {market_key} already settled as {state.get('status')}")
+            return state
+        self.wait_market_window(market_key, market_id)
         self.write(
             f"finalize:{market_key}",
             self.address,
-            "finalize_market_settlement",
+            "finalize_market",
             [market_id],
             account=self.main,
         )
+        return self.read_json("get_market", [market_id])
 
-    def claim_if_needed(self, market_key: str, market_id: int, account, label: str) -> None:
-        receipt = self.read_json("get_payout_receipt", [market_id, account.address])
-        if receipt.get("exists"):
-            log(f"claim {market_key} for {label} already recorded on chain")
+    def settle_after_finalize(self, market_key: str, market_id: int) -> None:
+        """Route to winner claims or the zero winner refund path by on chain status."""
+        state = self.read_json("get_market", [market_id])
+        status = state.get("status")
+        outcome = state.get("provisional_outcome")
+        if status == "REFUNDABLE_ZERO_WINNERS":
+            log(f"market {market_key} finalized as REFUNDABLE_ZERO_WINNERS, opening refunds")
+            for label in ("alice", "bob", "carol"):
+                account = self.burners[label]
+                receipt = self.read_json("get_payout_receipt", [market_id, account.address])
+                if receipt.get("exists"):
+                    continue
+                position = self.read_json("get_trader_portfolio", [account.address])
+                stakes = sum(
+                    p["principal"] for p in position.get("positions", []) if p["market_id"] == market_id
+                )
+                if stakes == 0:
+                    continue
+                self.write(f"refund:{market_key}:{label}", self.address, "claim_refund", [market_id], account=account)
+            self.write(
+                f"guard:double_refund:{market_key}",
+                self.address,
+                "claim_refund",
+                [market_id],
+                account=self.burners["alice"],
+                expect_error=True,
+            )
             return
-        self.write(
-            f"claim:{market_key}:{label}",
-            self.address,
-            "claim_market_payout",
-            [market_id],
-            account=account,
-        )
+
+        if outcome == "OUTCOME_INVALID_REFUND":
+            for label in ("alice", "bob", "carol"):
+                account = self.burners[label]
+                receipt = self.read_json("get_payout_receipt", [market_id, account.address])
+                if receipt.get("exists"):
+                    continue
+                position = self.read_json("get_trader_portfolio", [account.address])
+                stakes = sum(
+                    p["principal"] for p in position.get("positions", []) if p["market_id"] == market_id
+                )
+                if stakes == 0:
+                    continue
+                self.write(f"refund:{market_key}:{label}", self.address, "claim_market_payout", [market_id], account=account)
+            return
+
+        winner_yes = outcome == "OUTCOME_YES"
+        claims = {
+            "eth_blob": [("alice", "YES"), ("carol", "YES"), ("bob", "NO")],
+            "macro_gdp": [("bob", "YES"), ("carol", "NO")],
+            "ai_sdk": [("alice", "NO"), ("bob", "NO")],
+        }.get(market_key, [])
+        for label, side in claims:
+            account = self.burners[label]
+            receipt = self.read_json("get_payout_receipt", [market_id, account.address])
+            if receipt.get("exists"):
+                log(f"claim {market_key} for {label} already recorded on chain")
+                continue
+            is_winner = (side == "YES" and winner_yes) or (side == "NO" and not winner_yes)
+            if is_winner:
+                self.write(f"claim:{market_key}:{label}", self.address, "claim_market_payout", [market_id], account=account)
+            else:
+                self.write(
+                    f"guard:losing_claim:{market_key}:{label}",
+                    self.address,
+                    "claim_market_payout",
+                    [market_id],
+                    account=account,
+                    expect_error=True,
+                )
+        winners = [label for label, side in claims if (side == "YES" and winner_yes) or (side == "NO" and not winner_yes)]
+        if winners:
+            first = winners[0]
+            self.write(
+                f"guard:double_claim:{market_key}:{first}",
+                self.address,
+                "claim_market_payout",
+                [market_id],
+                account=self.burners[first],
+                expect_error=True,
+            )
 
     def ensure_deployed(self) -> str:
         if self.address:
@@ -445,7 +577,7 @@ class Runner:
         code = CONTRACT.read_text(encoding="utf-8")
         log("deploying contract to studionet")
         tx_hash = with_retries(
-            lambda: self.client.deploy_contract(code=code, account=self.main, args=[WINDOW, BOND]),
+            lambda: self.client.deploy_contract(code=code, account=self.main, args=[WINDOW, BOND, GRACE]),
             "deploy",
         )
         receipt = self.wait_final(tx_hash)
@@ -456,6 +588,7 @@ class Runner:
         self.address = address
         entry = self.summarize(tx_hash, receipt, "__deploy__", self.main.address)
         entry["contract_address"] = address
+        entry["contract_version"] = "v2-remediated"
         self.record("deploy", entry)
         self.checkpoint["contract_address"] = address
         save_json(CHECKPOINT, self.checkpoint)
@@ -535,19 +668,22 @@ class Runner:
                 key,
                 self.address,
                 "create_market",
-                [market["question"], market["category"], market["primary"], market["criteria"]],
+                [market["question"], market["category"], market["primary"], market["criteria"], market["duration"]],
                 account=self.main,
             )
-            market_id = self.read_scalar("get_market_count")
-            market_id = int(market_id)
+            market_id = int(self.read_scalar("get_market_count"))
             entry["market_id"] = market_id
+            entry["duration_epochs"] = market["duration"]
             self.checkpoint["steps"][key] = entry
             self.checkpoint["markets"][market["key"]] = market_id
             save_json(CHECKPOINT, self.checkpoint)
             log(f"market {market['key']} created with id {market_id}")
         return self.checkpoint["markets"]
 
-    def run(self) -> None:
+    def market_state(self, market_id: int) -> dict:
+        return self.read_json("get_market", [market_id])
+
+    def run(self) -> None:  # noqa: C901 - linear demo scenario
         address = self.ensure_deployed()
         if self.deploy_only:
             log("deploy only, stopping here")
@@ -567,10 +703,12 @@ class Runner:
             ("eth_blob", "alice", "YES", 300),
             ("eth_blob", "bob", "NO", 200),
             ("eth_blob", "carol", "YES", 100),
-            ("ai_sdk", "alice", "YES", 150),
+            ("ai_sdk", "alice", "NO", 150),
             ("ai_sdk", "bob", "NO", 90),
             ("macro_gdp", "bob", "YES", 120),
             ("macro_gdp", "carol", "NO", 80),
+            ("abandoned", "alice", "YES", 40),
+            ("abandoned", "bob", "NO", 20),
         ]
         for market_key, trader, side, amount in trades:
             account = self.burners[trader]
@@ -582,33 +720,82 @@ class Runner:
                 account=account,
             )
 
-        # Market 1: live resolution, premature claim guard, challenge, audit.
-        eth_market = markets["eth_blob"]
-        self.write("resolve:eth_blob", address, "resolve_market_live", [eth_market, MARKETS[0]["evidence"]], account=alice)
-        self.write("guard:premature_claim", address, "claim_market_payout", [eth_market], account=bob, expect_error=True)
-        self.write("challenge:eth_blob", address, "file_resolution_challenge", [eth_market, MARKETS[0]["counter"]], account=bob)
-        self.write("audit:eth_blob", address, "audit_resolution_challenge", [eth_market], account=carol)
-        self.close_window("eth_blob", eth_market)
-        self.finalize_if_needed("eth_blob", eth_market)
-        self.claim_if_needed("eth_blob", eth_market, alice, "alice")
-        self.claim_if_needed("eth_blob", eth_market, carol, "carol")
-        self.write("guard:losing_claim", address, "claim_market_payout", [eth_market], account=bob, expect_error=True)
-        self.write("guard:double_claim", address, "claim_market_payout", [eth_market], account=alice, expect_error=True)
+        # Guard probe: caller side clock manipulation is impossible in v2.
+        self.write("guard:advance_clock", address, "advance_market_clock", [WINDOW + 1], account=alice, expect_error=True)
+
+        eth = markets["eth_blob"]
+        ai = markets["ai_sdk"]
+        macro = markets["macro_gdp"]
+        abandoned = markets["abandoned"]
+
+        # Steward hole 1: premature resolution must revert on chain.
+        if not self.done("guard:early_resolution"):
+            self.write("guard:early_resolution", address, "propose_resolution", [eth, MARKETS[0]["evidence"]], account=alice, expect_error=True)
+
+        # The abandoned market is never resolved. Probe the expiry guard while
+        # it is still inside its resolution grace period.
+        if not self.done("guard:early_expiry"):
+            self.write("guard:early_expiry", address, "expire_unresolved_market", [abandoned], account=carol, expect_error=True)
+
+        # Market eth_blob: wait the objective close, then drive the full
+        # challenge flow with real time only.
+        eth_state = self.market_state(eth)
+        if eth_state.get("status") == "OPEN":
+            self.wait_for_epoch("eth_blob close epoch", int(eth_state["close_epoch"]))
+            if not self.done("guard:early_trading"):
+                self.write("guard:early_trading", address, "buy_outcome_shares", [eth, "YES", 10], account=carol, expect_error=True)
+            self.write("resolve:eth_blob", address, "propose_resolution", [eth, MARKETS[0]["evidence"]], account=alice)
+        eth_state = self.market_state(eth)
+        if eth_state.get("status") == "CHALLENGE_WINDOW":
+            # Fire the live challenge first: it re-runs consensus and restarts
+            # the window, so the early claim and finalize probes below always
+            # execute inside an open window even when the network is slow.
+            if not self.done("challenge:eth_blob"):
+                self.write("challenge:eth_blob", address, "challenge_resolution", [eth, MARKETS[0]["counter"]], account=bob)
+            if not self.done("guard:early_claim"):
+                self.write("guard:early_claim", address, "claim_market_payout", [eth], account=bob, expect_error=True)
+            if not self.done("guard:early_finalize"):
+                self.write("guard:early_finalize", address, "finalize_market", [eth], account=carol, expect_error=True)
+
+        # Market ai_sdk: only NO stakes. Consensus is expected to answer YES,
+        # producing the zero winner refund lifecycle.
+        ai_state = self.market_state(ai)
+        if ai_state.get("status") == "OPEN":
+            self.wait_for_epoch("ai_sdk close epoch", int(ai_state["close_epoch"]))
+            self.write("resolve:ai_sdk", address, "propose_resolution", [ai, MARKETS[1]["evidence"]], account=carol)
+
+        # Market macro_gdp: plain resolve and settle.
+        macro_state = self.market_state(macro)
+        if macro_state.get("status") == "OPEN":
+            self.wait_for_epoch("macro_gdp close epoch", int(macro_state["close_epoch"]))
+            self.write("resolve:macro_gdp", address, "propose_resolution", [macro, MARKETS[2]["evidence"]], account=bob)
+
+        self.finalize_when_ready("eth_blob", eth)
+        self.settle_after_finalize("eth_blob", eth)
         self.write("transfer:alice_to_bob", address, "transfer_tokens", [bob.address, 10], account=alice)
 
-        # Markets 2 and 3: resolve, close the window once, finalize and claim.
-        ai_state = self.read_json("get_market", [markets["ai_sdk"]])
-        if ai_state.get("status") == "OPEN":
-            self.write("resolve:ai_sdk", address, "resolve_market_live", [markets["ai_sdk"], MARKETS[1]["evidence"]], account=bob)
-        else:
-            log(f"market ai_sdk already {ai_state.get('status')} on chain, skipping the resolve step")
-        self.write("resolve:macro_gdp", address, "resolve_market_live", [markets["macro_gdp"], MARKETS[2]["evidence"]], account=carol)
-        self.close_window("ai_sdk", markets["ai_sdk"])
-        self.finalize_if_needed("ai_sdk", markets["ai_sdk"])
-        self.close_window("macro_gdp", markets["macro_gdp"])
-        self.finalize_if_needed("macro_gdp", markets["macro_gdp"])
-        self.claim_if_needed("ai_sdk", markets["ai_sdk"], alice, "alice")
-        self.claim_if_needed("macro_gdp", markets["macro_gdp"], bob, "bob")
+        self.finalize_when_ready("ai_sdk", ai)
+        self.settle_after_finalize("ai_sdk", ai)
+
+        self.finalize_when_ready("macro_gdp", macro)
+        self.settle_after_finalize("macro_gdp", macro)
+        if not self.done("guard:refund_wrong_status"):
+            self.write("guard:refund_wrong_status", address, "claim_refund", [macro], account=alice, expect_error=True)
+
+        # Steward hole 2: the abandoned market must expire and refund after
+        # the resolution timeout with zero further consensus.
+        ab_state = self.market_state(abandoned)
+        if ab_state.get("status") == "OPEN":
+            self.wait_for_epoch("abandoned timeout epoch", int(ab_state["resolution_timeout_epoch"]))
+            if not self.done("guard:post_timeout_proposal"):
+                self.write("guard:post_timeout_proposal", address, "propose_resolution", [abandoned, MARKETS[3]["evidence"]], account=alice, expect_error=True)
+            self.write("expire:abandoned", address, "expire_unresolved_market", [abandoned], account=carol)
+        ab_state = self.market_state(abandoned)
+        if ab_state.get("status") == "EXPIRED":
+            for label, account in (("alice", alice), ("bob", bob)):
+                receipt = self.read_json("get_payout_receipt", [abandoned, account.address])
+                if not receipt.get("exists"):
+                    self.write(f"refund:abandoned:{label}", address, "claim_refund", [abandoned], account=account)
 
         self.build_evidence()
 
@@ -620,6 +807,7 @@ class Runner:
         log("collecting on chain evidence")
         stats = self.read_json("get_platform_stats")
         invariants = self.read_json("check_vault_invariants")
+        access_model = self.read_json("get_access_model")
         markets_payload = []
         resolution_receipts = []
         for market in MARKETS:
@@ -627,8 +815,7 @@ class Runner:
             if market_id is None:
                 continue
             state = self.read_json("get_market", [market_id])
-            receipt = self.read_json("get_resolution_receipt", [market_id])
-            resolution_receipts.append(receipt)
+            resolution_receipts.append(self.read_json("get_resolution_receipt", [market_id]))
             markets_payload.append(
                 {
                     "key": market["key"],
@@ -638,6 +825,11 @@ class Runner:
                     "primary_source_url": state.get("primary_source_url"),
                     "status": state.get("status"),
                     "phase": state.get("phase"),
+                    "close_epoch": state.get("close_epoch"),
+                    "resolution_timeout_epoch": state.get("resolution_timeout_epoch"),
+                    "resolved_at_epoch": state.get("resolved_at_epoch"),
+                    "challenge_deadline_epoch": state.get("challenge_deadline_epoch"),
+                    "finalized_at_epoch": state.get("finalized_at_epoch"),
                     "yes_pool": state.get("yes_pool"),
                     "no_pool": state.get("no_pool"),
                     "forfeit_pot": state.get("forfeit_pot"),
@@ -645,10 +837,11 @@ class Runner:
                     "outcome_band": state.get("provisional_outcome"),
                     "confidence_anchor": state.get("confidence_anchor"),
                     "source_authenticated": state.get("source_authenticated"),
-                    "finalized_at_step": state.get("finalized_at_step"),
+                    "unclaimed_refund_principal": state.get("unclaimed_refund_principal"),
+                    "remaining_liability": state.get("remaining_liability"),
                     "evidence_digest": state.get("evidence_digest"),
                     "resolution_summary": state.get("resolution_summary"),
-                    "challenges": len(receipt.get("challenges", [])),
+                    "challenges": len(resolution_receipts[-1].get("challenges", [])),
                 }
             )
 
@@ -694,26 +887,36 @@ class Runner:
             remote_sha = None
 
         guard_reverts = []
-        for key, expected in GUARD_EXPECTATIONS.items():
-            if key in self.checkpoint["steps"]:
-                entry = self.step(key)
-                guard_reverts.append(
-                    {
-                        "step": key,
-                        "tx_hash": entry.get("tx_hash"),
-                        "expected": expected,
-                        "execution": entry.get("execution"),
-                        "result": entry.get("result"),
-                        "votes_agree": entry.get("votes_agree"),
-                        "votes_total": entry.get("votes_total"),
-                        "matched": entry.get("matched_expected_error", entry.get("execution") == "ERROR"),
-                    }
-                )
+        for key, entry in self.checkpoint["steps"].items():
+            if not key.startswith("guard:"):
+                continue
+            expected = GUARD_EXPECTATIONS.get(key, "")
+            if not expected:
+                for prefix, message in (
+                    ("guard:losing_claim", GUARD_EXPECTATIONS["guard:losing_claim"]),
+                    ("guard:double_claim", GUARD_EXPECTATIONS["guard:double_claim"]),
+                    ("guard:double_refund", GUARD_EXPECTATIONS["guard:double_refund"]),
+                ):
+                    if key.startswith(prefix):
+                        expected = message
+                        break
+            guard_reverts.append(
+                {
+                    "step": key,
+                    "tx_hash": entry.get("tx_hash"),
+                    "expected": expected,
+                    "execution": entry.get("execution"),
+                    "result": entry.get("result"),
+                    "votes_agree": entry.get("votes_agree"),
+                    "votes_total": entry.get("votes_total"),
+                    "matched": entry.get("matched_expected_error", entry.get("execution") == "ERROR"),
+                }
+            )
+        guard_reverts.sort(key=lambda row: row["step"])
 
         consensus_proofs = []
-        for key in ("resolve:eth_blob", "audit:eth_blob", "resolve:ai_sdk", "resolve:macro_gdp"):
-            if key in self.checkpoint["steps"]:
-                entry = self.step(key)
+        for key, entry in self.checkpoint["steps"].items():
+            if key.startswith(("resolve:", "challenge:")):
                 consensus_proofs.append(
                     {
                         "step": key,
@@ -725,6 +928,22 @@ class Runner:
                         "majority_agree": entry.get("result") == "MAJORITY_AGREE",
                     }
                 )
+        consensus_proofs.sort(key=lambda row: row["step"])
+
+        refund_proofs = []
+        for key, entry in self.checkpoint["steps"].items():
+            if key.startswith(("refund:", "expire:")):
+                refund_proofs.append(
+                    {
+                        "step": key,
+                        "tx_hash": entry.get("tx_hash"),
+                        "function": entry.get("function"),
+                        "status": entry.get("status"),
+                        "result": entry.get("result"),
+                        "execution": entry.get("execution"),
+                    }
+                )
+        refund_proofs.sort(key=lambda row: row["step"])
 
         local_checks = run_local_checks()
         identity = {
@@ -744,6 +963,7 @@ class Runner:
 
         evidence = {
             "project": "ProphetGrid",
+            "contract_version": "v2-remediated",
             "network": "studionet",
             "chain_id": CHAIN_ID,
             "rpc_url": RPC_URL,
@@ -752,7 +972,9 @@ class Runner:
             "contract_address": self.address,
             "deployer": self.main.address,
             "runner_pin": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
-            "challenge_window_steps": WINDOW,
+            "challenge_window_epochs": WINDOW,
+            "resolution_grace_epochs": GRACE,
+            "epoch_seconds": EPOCH_SECONDS,
             "challenge_bond_amount": BOND,
             "signers": {
                 "deployer": self.main.address,
@@ -762,14 +984,17 @@ class Runner:
             },
             "markets": markets_payload,
             "resolution_receipts": resolution_receipts,
+            "access_model": access_model,
             "notes": [
-                "resolve:ai_sdk was applied by an interrupted run. The finalize transaction and the on chain resolution receipt for market 2 prove the resolved state.",
-                "guard reverts are real transactions that finalized with MAJORITY_AGREE and a leader execution result of ERROR.",
+                "v2 remediation: the logical clock was removed. Epochs derive from the objective block datetime. advance_market_clock reverts for every caller.",
+                "guard transactions are real submissions that finalized with MAJORITY_AGREE and a leader execution result of ERROR, proving the revert happened inside validator consensus, not off chain.",
+                "the abandoned market demonstrates the unresolved market refund path: expire after resolution_timeout_epoch, then claim_refund of 100 percent principal.",
             ],
             "platform_stats": stats,
             "vault_invariants": invariants,
             "guard_reverts": guard_reverts,
             "consensus_proofs": consensus_proofs,
+            "refund_lifecycle": refund_proofs,
             "sha256_identity": identity,
             "local_checks": local_checks,
             "explorer": f"https://genlayer-explorer.vercel.app/contracts/{self.address}",
@@ -807,11 +1032,10 @@ def git_blob_object(root: Path) -> str | None:
 
 
 def run_local_checks() -> dict:
-    venv = ROOT / ".venv" / "bin"
     result = {"lint": "not run", "tests": "not run", "tests_passed": 0, "tests_failed": 0}
     try:
         lint = subprocess.run(
-            [str(venv / "genvm-lint"), "check", str(CONTRACT)],
+            [venv_exe("genvm-lint"), "check", str(CONTRACT)],
             capture_output=True,
             text=True,
             timeout=180,
@@ -823,19 +1047,16 @@ def run_local_checks() -> dict:
 
     try:
         tests = subprocess.run(
-            [str(venv / "pytest"), "tests/test_prophet_grid_direct.py", "-q"],
+            [venv_exe("pytest"), "tests/test_prophet_grid_direct.py", "-q"],
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=900,
             cwd=str(ROOT),
         )
         tail = (tests.stdout or "").strip().splitlines()
         summary = tail[-1] if tail else ""
         result["tests"] = "passed" if tests.returncode == 0 else "failed"
         result["tests_summary"] = summary
-        for token in summary.split():
-            if token.isdigit():
-                continue
         if " passed" in summary:
             try:
                 result["tests_passed"] = int(summary.split(" passed")[0].split()[-1])

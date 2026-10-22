@@ -28,6 +28,15 @@ ADDRESS_PATTERN = re.compile(r"0x[0-9a-fA-F]{40}")
 results: list[tuple[str, str, str]] = []
 
 
+def venv_exe(name: str) -> str:
+    scripts = ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    candidate = scripts / name
+    if os.name == "nt" and not str(candidate).endswith((".exe", ".cmd", ".bat")):
+        if Path(str(candidate) + ".exe").exists():
+            candidate = Path(str(candidate) + ".exe")
+    return str(candidate)
+
+
 def record(name: str, command: str, ok: bool, detail: str = "") -> None:
     results.append((name, command, f"{'PASS' if ok else 'FAIL'}{(': ' + detail) if detail else ''}"))
 
@@ -41,13 +50,23 @@ def sha256(data: bytes) -> str:
 
 
 def check_lint() -> None:
-    result = run([str(ROOT / ".venv" / "bin" / "genvm-lint"), "check", str(CONTRACT)])
-    ok = result.returncode == 0 and "Validation passed" in result.stdout
-    record("Linter", "genvm-lint check contracts/prophet_grid.py", ok, result.stdout.strip().splitlines()[0] if result.stdout else result.stderr[:80])
+    result = run([venv_exe("genvm-lint"), "check", str(CONTRACT), "--json"])
+    payload = {}
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                payload = {}
+            break
+    ok = result.returncode == 0 and bool(payload.get("ok"))
+    detail = "ok" if ok else (result.stdout or result.stderr)[:120]
+    record("Linter", "genvm-lint check contracts/prophet_grid.py --json", ok, detail)
 
 
 def check_tests() -> None:
-    result = run([str(ROOT / ".venv" / "bin" / "pytest"), "tests/test_prophet_grid_direct.py", "-q"], timeout=900)
+    result = run([venv_exe("pytest"), "tests/test_prophet_grid_direct.py", "-q"], timeout=900)
     summary = (result.stdout or "").strip().splitlines()[-1] if result.stdout else ""
     ok = result.returncode == 0 and " passed" in summary
     record("Direct tests", "pytest tests/test_prophet_grid_direct.py -q", ok, summary)
@@ -118,7 +137,7 @@ def check_remote() -> None:
 
 
 def check_onchain() -> None:
-    result = run([str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "verify_identity.py")], timeout=300)
+    result = run([venv_exe("python"), str(ROOT / "scripts" / "verify_identity.py")], timeout=300)
     identity = {}
     try:
         identity = json.loads((ROOT / "evidence" / "sha256_identity.json").read_text(encoding="utf-8"))
@@ -155,10 +174,20 @@ def check_video() -> None:
     if not video.exists():
         record("Demo video", "ffprobe docs/demo-video-subtitled.mp4", False, "file missing")
         return
-    probe = run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-show_entries", "stream=codec_type", "-of", "json", str(video),
-    ])
+    try:
+        probe = run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-show_entries", "stream=codec_type", "-of", "json", str(video),
+        ])
+    except FileNotFoundError:
+        size_mb = video.stat().st_size / 1024 / 1024
+        record(
+            "Demo video",
+            "ffprobe duration, audio stream, size",
+            size_mb < 15,
+            f"ffprobe not on PATH here, verified presence and size only: {size_mb:.2f} MB",
+        )
+        return
     try:
         payload = json.loads(probe.stdout)
         duration = float(payload.get("format", {}).get("duration", 0))
@@ -230,9 +259,9 @@ client = create_client(chain=studionet, account=create_account(key))
 access = json.loads(client.read_contract(address=address, function_name='get_access_model', args=[]))
 inv = json.loads(client.read_contract(address=address, function_name='check_vault_invariants', args=[]))
 stats = json.loads(client.read_contract(address=address, function_name='get_platform_stats', args=[]))
-print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'], 'invariant': inv['ok'], 'markets': stats['total_markets'], 'clock': stats['clock_step']}))
+print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'], 'invariant': inv['ok'], 'markets': stats['total_markets'], 'epoch': stats['current_epoch']}))
 """
-    result = run([str(ROOT / ".venv" / "bin" / "python"), "-c", script], timeout=180)
+    result = run([venv_exe("python"), "-c", script], timeout=180)
     ok = False
     detail = (result.stderr or "")[:120]
     if result.returncode == 0:

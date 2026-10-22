@@ -27,7 +27,7 @@ const GUARDS: GuardSpec[] = [
     kind: "premature",
     title: "Premature claim before window close",
     expected: "[EXPECTED] payout blocked: CHALLENGE_WINDOW_OPEN",
-    rule: "claim_market_payout refuses while now < challenge_deadline_step. The pot and bonds stay in custody.",
+    rule: "claim_market_payout refuses while current_epoch <= challenge_deadline_epoch. The pot stays in custody until the window strictly elapses.",
     icon: ShieldX,
     tone: "amber",
   },
@@ -52,7 +52,7 @@ const GUARDS: GuardSpec[] = [
 export function GuardLab({ markets, positions, address, busy, onProbe }: GuardLabProps) {
   const [results, setResults] = useState<Record<string, { text: string; live: boolean }>>({});
 
-  const provisional = markets.find((market) => market.status === "PROVISIONAL" && market.challenge_open);
+  const provisional = markets.find((market) => market.status === "CHALLENGE_WINDOW" && market.challenge_open);
   const finalized = markets.find((market) => market.status === "FINALIZED");
 
   const targetFor = (kind: GuardKind): { market: Market; reason: string; ready: boolean } | null => {

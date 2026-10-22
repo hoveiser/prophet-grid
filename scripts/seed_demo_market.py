@@ -24,6 +24,7 @@ from deploy_studionet import CHECKPOINT, Runner, log, save_json  # noqa: E402
 
 PROVISIONAL_MARKET = {
     "key": "demo_eip4844",
+    "duration": 12,
     "question": "Does EIP-4844 set the Ethereum blob target to 3 and the maximum to 6 per block?",
     "category": "TECH",
     "primary": "https://eips.ethereum.org/EIPS/eip-4844",
@@ -36,6 +37,7 @@ PROVISIONAL_MARKET = {
 
 OPEN_MARKET = {
     "key": "demo_cpi",
+    "duration": 120,
     "question": "Will the latest World Bank US inflation print stay below 5 percent?",
     "category": "MACRO",
     "primary": "https://api.worldbank.org/v2/country/USA/indicator/FP.CPI.TOTL.ZG?format=json&per_page=3",
@@ -76,6 +78,7 @@ def main() -> int:
                 PROVISIONAL_MARKET["category"],
                 PROVISIONAL_MARKET["primary"],
                 PROVISIONAL_MARKET["criteria"],
+                PROVISIONAL_MARKET["duration"],
             ],
             account=runner.main,
         )
@@ -92,13 +95,17 @@ def main() -> int:
 
     runner.write("trade:demo_eip4844:alice:YES", runner.address, "buy_outcome_shares", [provisional_id, "YES", 250], account=alice)
     runner.write("trade:demo_eip4844:bob:NO", runner.address, "buy_outcome_shares", [provisional_id, "NO", 150], account=bob)
-    runner.write(
-        "resolve:demo_eip4844",
-        runner.address,
-        "resolve_market_live",
-        [provisional_id, PROVISIONAL_MARKET["evidence"]],
-        account=alice,
-    )
+    demo_state = runner.read_json("get_market", [provisional_id])
+    if demo_state.get("status") == "OPEN":
+        runner.wait_for_epoch("demo_eip4844 close epoch", int(demo_state["close_epoch"]))
+    if not runner.done("resolve:demo_eip4844"):
+        runner.write(
+            "resolve:demo_eip4844",
+            runner.address,
+            "propose_resolution",
+            [provisional_id, PROVISIONAL_MARKET["evidence"]],
+            account=alice,
+        )
 
     # Market 5: stays open for trading.
     key_open = f"market:{OPEN_MARKET['key']}"
@@ -112,6 +119,7 @@ def main() -> int:
                 OPEN_MARKET["category"],
                 OPEN_MARKET["primary"],
                 OPEN_MARKET["criteria"],
+                OPEN_MARKET["duration"],
             ],
             account=runner.main,
         )
@@ -131,8 +139,8 @@ def main() -> int:
 
     state = runner.read_json("get_market", [provisional_id])
     log(
-        "demo market %s status=%s phase=%s window=%s steps"
-        % (provisional_id, state.get("status"), state.get("phase"), state.get("countdown_steps"))
+        "demo market %s status=%s phase=%s window=%s epochs"
+        % (provisional_id, state.get("status"), state.get("phase"), state.get("countdown_epochs"))
     )
     stats = runner.read_json("get_platform_stats")
     log("platform markets=%s tvl=%s invariant_ok=%s" % (stats.get("total_markets"), stats.get("tvl"), stats.get("invariant_ok")))

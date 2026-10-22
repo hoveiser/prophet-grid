@@ -89,13 +89,13 @@ export function MarketCard({ market, selected, onSelect, onInspect }: MarketCard
 
       <div className="flex items-center justify-between border-t border-line/70 pt-2.5">
         <div className="flex items-center gap-3 text-[10px] text-muted">
-          {market.status === "PROVISIONAL" && market.challenge_open ? (
+          {market.status === "CHALLENGE_WINDOW" && market.challenge_open ? (
             <span className="flex items-center gap-1 text-amber">
-              <Clock3 size={11} /> window {market.countdown_steps} steps
+              <Clock3 size={11} /> window {market.countdown_epochs} epochs
             </span>
-          ) : market.status === "CHALLENGED" ? (
+          ) : market.status === "REFUNDABLE_ZERO_WINNERS" || market.status === "EXPIRED" ? (
             <span className="flex items-center gap-1 text-orange-300">
-              <ShieldQuestion size={11} /> bond {formatExact(market.challenge_bond_locked)}
+              <ShieldQuestion size={11} /> refund {formatExact(market.unclaimed_refund_principal)}
             </span>
           ) : (
             <span className="flex items-center gap-1">

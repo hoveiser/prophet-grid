@@ -1,12 +1,23 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
-"""ProphetGrid: AI adjudicated conditional macro and tech event prediction market.
+"""ProphetGrid v2: AI adjudicated conditional macro and tech event prediction market.
 
 The contract is a fully collateralized parimutuel market with an on-chain
 token ledger and a custody vault. Markets resolve only through live validator
 consensus over external evidence. Nobody, including the deployer, can write a
 verdict deterministically. Every payout is computed from one shared settlement
 helper so display, preview and transfer paths can never disagree.
+
+Temporal model (steward remediation)
+------------------------------------
+There is no advanceable logical clock. Every market phase binds to an
+objective epoch derived from the transaction datetime of the finalized block:
+current_epoch = unix_seconds / EPOCH_SECONDS. Predictions are only accepted
+while current_epoch < close_epoch, resolution proposals only while
+close_epoch <= current_epoch < resolution_timeout_epoch, and finalization only
+once current_epoch > challenge_deadline_epoch. No caller can jump the clock,
+resolve before the objective deadline or compress a challenge window. Any
+attempt to call advance_market_clock reverts deterministically.
 
 Accounting model
 ----------------
@@ -16,18 +27,32 @@ challenge bonds. check_vault_invariants() proves that identity on chain.
 
 Rounds and rules of engagement
 ------------------------------
-1. Users mint test collateral with faucet_or_deposit and buy YES or NO shares.
-2. Anyone can request a live resolution. Validators re-fetch the primary
-   source and the submitted evidence, then must agree exactly on the outcome
-   band, the confidence anchor and the evidence authenticity flag.
-3. A provisional verdict opens a challenge window. The whole pot plus any
-   challenge bond stays locked in custody until the window closes.
-4. A challenge triggers a second live audit. A failed challenge forfeits the
-   bond into the market pot, an overturned challenge refunds the bond.
-5. After the window closes anyone can finalize. Claims are exact and the last
-   claimant absorbs the rounding dust, so the sum of payouts equals the pot.
+1. Users mint test collateral with faucet_or_deposit and buy YES or NO shares
+   until the objective close epoch of the market.
+2. Once the close epoch is reached anyone may request a live resolution
+   proposal. Validators re-fetch the primary source and the submitted
+   evidence, then must agree exactly on the outcome band, the confidence
+   anchor and the evidence authenticity flag.
+3. The proposal locks the market in CHALLENGE_WINDOW. The whole pot plus any
+   forfeited bond stays locked in custody until current_epoch strictly
+   exceeds challenge_deadline_epoch.
+4. A bond backed challenge inside the window re-runs the same live
+   comparative consensus over the counter evidence in the same transaction.
+   An upheld challenge forfeits the bond into the market pot, an overturned
+   challenge refunds the bond and updates the provisional outcome. Either
+   outcome restarts the challenge window, rebuttals included.
+5. After the window closes anyone can finalize. Winning payouts are exact
+   and the last claimant absorbs the rounding dust, so the sum of payouts
+   equals the pot.
+6. Two refund paths guarantee that funded state is never locked forever. A
+   market finalized with zero winning stake flips to REFUNDABLE_ZERO_WINNERS.
+   A market left unresolved at or past resolution_timeout_epoch can be
+   expired by any participant. Both paths refund the full principal through
+   claim_refund, pro rata plus dust to the last claimant, so the vault
+   reconciles to the exact wei in every branch.
 """
 
+import datetime
 import json
 from dataclasses import dataclass
 
@@ -52,20 +77,33 @@ STANCE_UNKNOWN = "UNKNOWN"
 STANCE_UNDETERMINED = "UNDETERMINED"
 
 STATUS_OPEN = "OPEN"
-STATUS_PROVISIONAL = "PROVISIONAL"
-STATUS_CHALLENGED = "CHALLENGED"
+STATUS_CHALLENGE_WINDOW = "CHALLENGE_WINDOW"
 STATUS_FINALIZED = "FINALIZED"
+STATUS_REFUNDABLE_ZERO_WINNERS = "REFUNDABLE_ZERO_WINNERS"
+STATUS_EXPIRED = "EXPIRED"
+
+REFUND_STATUSES = (STATUS_REFUNDABLE_ZERO_WINNERS, STATUS_EXPIRED)
 
 PHASE_TRADING = "TRADING"
+PHASE_CLOSED_WAITING_RESOLUTION = "CLOSED_WAITING_RESOLUTION"
 PHASE_CHALLENGE_WINDOW = "CHALLENGE_WINDOW"
 PHASE_READY_TO_FINALIZE = "READY_TO_FINALIZE"
-PHASE_REAUDIT_PENDING = "REAUDIT_PENDING"
 PHASE_SETTLED = "SETTLED"
+PHASE_ZERO_WINNER_REFUND = "ZERO_WINNER_REFUND"
+PHASE_EXPIRED_REFUND = "EXPIRED_REFUND"
 
-CHALLENGE_PENDING = "PENDING"
 CHALLENGE_UPHELD = "UPHELD"
 CHALLENGE_OVERTURNED = "OVERTURNED"
-CHALLENGE_ABORTED = "ABORTED"
+
+REFUND_RECEIPT_BAND = "REFUND"
+
+EPOCH_SECONDS = 60
+MIN_CHALLENGE_WINDOW_EPOCHS = 1
+MAX_CHALLENGE_WINDOW_EPOCHS = 1440
+MIN_RESOLUTION_GRACE_EPOCHS = 1
+MAX_RESOLUTION_GRACE_EPOCHS = 40320
+MIN_MARKET_DURATION_EPOCHS = 1
+MAX_MARKET_DURATION_EPOCHS = 525600
 
 CONFIDENCE_ANCHORS = (0, 25, 50, 75, 100)
 CONFIDENCE_RESOLVE_THRESHOLD = 75
@@ -73,7 +111,6 @@ MAX_DOCUMENT_CHARS = 6000
 MAX_SUMMARY_CHARS = 400
 MAX_MARKETS = 200
 MAX_CHALLENGES_PER_MARKET = 2
-MAX_CLOCK_STEPS_PER_CALL = 1000
 MAX_TRADE_AMOUNT = 1000000
 FAUCET_CAP_PER_CALL = 100000
 TOKEN_SUPPLY_CAP = 100000000
@@ -126,6 +163,131 @@ def _fail(message: str) -> None:
 
 def _u(value) -> int:
     return int(value)
+
+
+def _days_from_civil(year: int, month: int, day: int) -> int:
+    """Days between 1970-01-01 and y-m-d using integer math only.
+
+    Standard civil from days algorithm. Every validator computes byte
+    identical values because no floating point or stdlib calendar is used.
+    """
+    year = year - 1 if month <= 2 else year
+    era = (year if year >= 0 else year - 399) // 400
+    year_of_era = year - era * 400
+    day_of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    return era * 146097 + day_of_era - 719468
+
+
+def _iso_to_unix_seconds(raw) -> int:
+    """Parse a transaction datetime deterministically into unix seconds.
+
+    Accepts ISO 8601 with a T or space separator, an optional fractional
+    second, and either a Z suffix or a plus or minus hour minute offset. A
+    plain integer string is treated as unix seconds already. Anything else
+    reverts with [TRANSIENT] so no phase check can silently pass.
+    """
+    if not isinstance(raw, str):
+        _fail(ERROR_TRANSIENT + " transaction datetime must be a string")
+    text = raw.strip()
+    if len(text) == 0:
+        _fail(ERROR_TRANSIENT + " transaction datetime is empty")
+    if text.isdigit():
+        return int(text)
+    if "T" in text:
+        date_part = text[: text.index("T")]
+        time_part = text[text.index("T") + 1 :]
+    elif " " in text:
+        date_part = text[: text.index(" ")]
+        time_part = text[text.index(" ") + 1 :]
+    else:
+        _fail(ERROR_TRANSIENT + " transaction datetime is not ISO 8601")
+    date_part = date_part.strip()
+    time_part = time_part.strip()
+
+    offset_seconds = 0
+    if len(time_part) > 0 and time_part[-1] in ("Z", "z"):
+        time_part = time_part[:-1]
+    else:
+        sign_index = -1
+        sign_char = ""
+        scan = len(time_part) - 1
+        while scan > 3:
+            if time_part[scan] in "+-":
+                sign_index = scan
+                sign_char = time_part[scan]
+                break
+            scan -= 1
+        if sign_index >= 0:
+            offset_bits = time_part[sign_index + 1 :].replace(":", "")
+            time_part = time_part[:sign_index]
+            if len(offset_bits) not in (2, 4) or not offset_bits.isdigit():
+                _fail(ERROR_TRANSIENT + " transaction datetime offset is malformed")
+            if len(offset_bits) == 2:
+                offset_seconds = int(offset_bits) * 3600
+            else:
+                offset_seconds = int(offset_bits[:2]) * 3600 + int(offset_bits[2:]) * 60
+            if sign_char == "-":
+                offset_seconds = -offset_seconds
+
+    if "." in time_part:
+        time_part = time_part.split(".", 1)[0]
+    if "," in time_part:
+        time_part = time_part.split(",", 1)[0]
+
+    date_bits = date_part.split("-")
+    time_bits = time_part.split(":")
+    if len(date_bits) != 3 or len(time_bits) not in (2, 3):
+        _fail(ERROR_TRANSIENT + " transaction datetime is malformed")
+    for bit in date_bits + time_bits:
+        if not bit.isdigit():
+            _fail(ERROR_TRANSIENT + " transaction datetime is malformed")
+
+    year = int(date_bits[0])
+    month = int(date_bits[1])
+    day = int(date_bits[2])
+    hour = int(time_bits[0])
+    minute = int(time_bits[1])
+    second = int(time_bits[2]) if len(time_bits) == 3 else 0
+    if month < 1 or month > 12 or day < 1 or day > 31:
+        _fail(ERROR_TRANSIENT + " transaction datetime date part is out of range")
+    if hour > 23 or minute > 59 or second > 60:
+        _fail(ERROR_TRANSIENT + " transaction datetime time part is out of range")
+    if second == 60:
+        second = 59
+    return (
+        _days_from_civil(year, month, day) * 86400
+        + hour * 3600
+        + minute * 60
+        + second
+        - offset_seconds
+    )
+
+
+def _current_epoch() -> int:
+    """Objective epoch from deterministic block time. Never caller settable.
+
+    GenLayer provides a deterministic datetime whose value comes from the
+    finalized block data, so every validator observes the same clock and the
+    progression is strictly monotonic per chain head. There is no storage
+    clock to manipulate. The transaction datetime parsed from the incoming
+    message is the fallback so the two sources can never silently disagree
+    about which epoch a call lands in.
+    """
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        offset = now.utcoffset()
+        offset_seconds = 0 if offset is None else offset.days * 86400 + offset.seconds
+        seconds = (
+            _days_from_civil(now.year, now.month, now.day) * 86400
+            + now.hour * 3600
+            + now.minute * 60
+            + now.second
+            - offset_seconds
+        )
+    except Exception:
+        seconds = _iso_to_unix_seconds(gl.message_raw["datetime"])
+    return seconds // EPOCH_SECONDS
 
 
 def _sanitize_document(raw, limit: int = MAX_DOCUMENT_CHARS) -> str:
@@ -524,13 +686,14 @@ class MarketRecord:
     resolution_summary: str
     evidence_url: str
     evidence_digest: str
-    resolved_at_step: u256
-    challenge_deadline_step: u256
+    close_epoch: u256
+    resolution_timeout_epoch: u256
+    resolved_at_epoch: u256
+    challenge_deadline_epoch: u256
     challenge_count: u256
-    challenge_bond_locked: u256
     trade_count: u256
-    created_at_step: u256
-    finalized_at_step: u256
+    created_at_epoch: u256
+    finalized_at_epoch: u256
 
 
 @allow_storage
@@ -541,11 +704,11 @@ class ChallengeRecord:
     challenger: Address
     counter_evidence_url: str
     bond: u256
-    filed_at_step: u256
+    filed_at_epoch: u256
     status: str
     original_outcome: str
     final_outcome: str
-    reviewed_at_step: u256
+    reviewed_at_epoch: u256
 
 
 @allow_storage
@@ -557,7 +720,7 @@ class PayoutReceipt:
     shares: u256
     principal: u256
     payout: u256
-    claimed_at_step: u256
+    claimed_at_epoch: u256
     digest: str
 
 
@@ -582,20 +745,42 @@ class ProphetGrid(gl.Contract):
     receipts: TreeMap[str, PayoutReceipt]
     receipt_keys: DynArray[str]
 
-    clock_step: u256
-    challenge_window_steps: u256
+    challenge_window_epochs: u256
+    resolution_grace_epochs: u256
     challenge_bond_amount: u256
     total_volume: u256
     total_paid_out: u256
     deposit_count: u256
 
-    def __init__(self, challenge_window_steps: u256, challenge_bond_amount: u256) -> None:
-        window = _u(challenge_window_steps)
+    def __init__(
+        self,
+        challenge_window_epochs: u256,
+        challenge_bond_amount: u256,
+        resolution_grace_epochs: u256,
+    ) -> None:
+        window = _u(challenge_window_epochs)
         bond = _u(challenge_bond_amount)
-        if window < 1 or window > MAX_CLOCK_STEPS_PER_CALL:
-            _fail(ERROR_EXPECTED + " challenge window must be between 1 and 1000 steps")
+        grace = _u(resolution_grace_epochs)
+        if window < MIN_CHALLENGE_WINDOW_EPOCHS or window > MAX_CHALLENGE_WINDOW_EPOCHS:
+            _fail(
+                ERROR_EXPECTED
+                + " challenge window must be between "
+                + str(MIN_CHALLENGE_WINDOW_EPOCHS)
+                + " and "
+                + str(MAX_CHALLENGE_WINDOW_EPOCHS)
+                + " epochs"
+            )
         if bond < 1 or bond > MAX_TRADE_AMOUNT:
             _fail(ERROR_EXPECTED + " challenge bond must be between 1 and 1000000")
+        if grace < MIN_RESOLUTION_GRACE_EPOCHS or grace > MAX_RESOLUTION_GRACE_EPOCHS:
+            _fail(
+                ERROR_EXPECTED
+                + " resolution grace must be between "
+                + str(MIN_RESOLUTION_GRACE_EPOCHS)
+                + " and "
+                + str(MAX_RESOLUTION_GRACE_EPOCHS)
+                + " epochs"
+            )
 
         self.token_name = TOKEN_NAME
         self.token_symbol = TOKEN_SYMBOL
@@ -603,8 +788,8 @@ class ProphetGrid(gl.Contract):
         self.total_supply = u256(0)
         self.vault_custody_balance = u256(0)
         self.next_market_id = u256(1)
-        self.clock_step = u256(0)
-        self.challenge_window_steps = u256(window)
+        self.challenge_window_epochs = u256(window)
+        self.resolution_grace_epochs = u256(grace)
         self.challenge_bond_amount = u256(bond)
         self.total_volume = u256(0)
         self.total_paid_out = u256(0)
@@ -676,8 +861,20 @@ class ProphetGrid(gl.Contract):
     # ------------------------------------------------------------------
 
     @gl.public.write
-    def create_market(self, question: str, category: str, primary_source_url: str, resolution_criteria: str) -> u256:
-        """Create a conditional market. Any account may create a market."""
+    def create_market(
+        self,
+        question: str,
+        category: str,
+        primary_source_url: str,
+        resolution_criteria: str,
+        duration_epochs: u256,
+    ) -> u256:
+        """Create a conditional market with an objective close epoch.
+
+        duration_epochs is hard validated against a floor and a ceiling. The
+        close epoch and the resolution timeout epoch are frozen at creation,
+        so every later phase check binds to the same objective deadline.
+        """
         if not isinstance(question, str):
             _fail(ERROR_EXPECTED + " question must be a string")
         text = question.strip()
@@ -696,7 +893,19 @@ class ProphetGrid(gl.Contract):
         source = _sanitize_url(primary_source_url, "primary source")
         if len(self.market_ids) >= MAX_MARKETS:
             _fail(ERROR_EXPECTED + " market capacity reached")
+        duration = _u(duration_epochs)
+        if duration < MIN_MARKET_DURATION_EPOCHS or duration > MAX_MARKET_DURATION_EPOCHS:
+            _fail(
+                ERROR_EXPECTED
+                + " market duration must be between "
+                + str(MIN_MARKET_DURATION_EPOCHS)
+                + " and "
+                + str(MAX_MARKET_DURATION_EPOCHS)
+                + " epochs"
+            )
 
+        now_epoch = _current_epoch()
+        close_epoch = now_epoch + duration
         market_id = self.next_market_id
         record = MarketRecord(
             market_id=market_id,
@@ -717,13 +926,14 @@ class ProphetGrid(gl.Contract):
             resolution_summary="",
             evidence_url="",
             evidence_digest="",
-            resolved_at_step=u256(0),
-            challenge_deadline_step=u256(0),
+            close_epoch=u256(close_epoch),
+            resolution_timeout_epoch=u256(close_epoch + _u(self.resolution_grace_epochs)),
+            resolved_at_epoch=u256(0),
+            challenge_deadline_epoch=u256(0),
             challenge_count=u256(0),
-            challenge_bond_locked=u256(0),
             trade_count=u256(0),
-            created_at_step=self.clock_step,
-            finalized_at_step=u256(0),
+            created_at_epoch=u256(now_epoch),
+            finalized_at_epoch=u256(0),
         )
         self.markets[market_id] = record
         self.market_ids.append(market_id)
@@ -732,10 +942,17 @@ class ProphetGrid(gl.Contract):
 
     @gl.public.write
     def buy_outcome_shares(self, market_id: u256, side: str, amount: u256) -> str:
-        """Buy YES or NO shares at par. One token unit buys one share."""
+        """Buy YES or NO shares at par. One token unit buys one share.
+
+        Trading is gated on the objective close epoch as well as the OPEN
+        status: a stake only lands while current_epoch < close_epoch.
+        """
         market = self._load_market(market_id)
         if market.status != STATUS_OPEN:
             _fail(ERROR_EXPECTED + " market is not open for trading")
+        now_epoch = _current_epoch()
+        if now_epoch >= _u(market.close_epoch):
+            _fail(ERROR_EXPECTED + " market trading window is closed")
         if not isinstance(side, str):
             _fail(ERROR_EXPECTED + " side must be a string")
         direction = side.strip().upper()
@@ -777,28 +994,38 @@ class ProphetGrid(gl.Contract):
 
     @gl.public.write
     def advance_market_clock(self, steps: u256) -> u256:
-        """Advance the logical market clock. Permissionless and bounded."""
-        delta = _u(steps)
-        if delta < 1 or delta > MAX_CLOCK_STEPS_PER_CALL:
-            _fail(ERROR_EXPECTED + " clock step size is out of bounds")
-        self.clock_step = u256(_u(self.clock_step) + delta)
-        return self.clock_step
+        """Removed in v2. Present only so legacy callers fail loudly.
+
+        Epochs follow the objective transaction datetime of the finalized
+        block. No caller, at any privilege level, can advance, rewind or
+        compress time, so this entry point always reverts deterministically.
+        """
+        _fail(ERROR_EXPECTED + " advance_market_clock is removed, epochs derive from block datetime and cannot be manipulated")
+        return u256(0)
 
     # ------------------------------------------------------------------
     # Live resolution, challenge window and settlement
     # ------------------------------------------------------------------
-
     @gl.public.write
-    def resolve_market_live(self, market_id: u256, resolution_evidence_url: str) -> str:
-        """Resolve a market through live validator consensus only.
+    def propose_resolution(self, market_id: u256, resolution_evidence_url: str) -> str:
+        """Propose a market resolution through live validator consensus only.
 
-        All storage reads happen before the non deterministic block. The
-        adjudication only ever sees plain string arguments, so no storage
-        object can leak into the consensus closure.
+        Strict temporal gates. The proposal reverts while
+        current_epoch < close_epoch, so no caller can resolve before the
+        objective deadline, and it reverts once
+        current_epoch >= resolution_timeout_epoch, where the refund path
+        takes over. All storage reads happen before the non deterministic
+        block. The adjudication only ever sees plain string arguments, so no
+        storage object can leak into the consensus closure.
         """
         market = self._load_market(market_id)
         if market.status != STATUS_OPEN:
-            _fail(ERROR_EXPECTED + " market is not open for live resolution")
+            _fail(ERROR_EXPECTED + " market is not open for a resolution proposal")
+        now_epoch = _current_epoch()
+        if now_epoch < _u(market.close_epoch):
+            _fail(ERROR_EXPECTED + " resolution is gated until the objective close epoch")
+        if now_epoch >= _u(market.resolution_timeout_epoch):
+            _fail(ERROR_EXPECTED + " resolution timeout elapsed, call expire_unresolved_market for refunds")
         if _u(market.yes_pool) + _u(market.no_pool) == 0:
             _fail(ERROR_EXPECTED + " market has no positions to resolve")
 
@@ -809,8 +1036,7 @@ class ProphetGrid(gl.Contract):
         question = market.question
         criteria = market.resolution_criteria
         primary_url = market.primary_source_url
-        now_step = _u(self.clock_step)
-        window = _u(self.challenge_window_steps)
+        window = _u(self.challenge_window_epochs)
 
         result = _run_live_adjudication(primary_url, evidence_url, question, criteria)
         verified = _verify_consensus(result)
@@ -823,27 +1049,32 @@ class ProphetGrid(gl.Contract):
         market.evidence_digest = _evidence_digest(
             primary_url, evidence_url, verified["outcome_band"], verified["confidence_anchor"]
         )
-        market.resolved_at_step = u256(now_step)
-        market.challenge_deadline_step = u256(now_step + window)
-        market.status = STATUS_PROVISIONAL
+        market.resolved_at_epoch = u256(now_epoch)
+        market.challenge_deadline_epoch = u256(now_epoch + window)
+        market.status = STATUS_CHALLENGE_WINDOW
         self._save_market(market)
         return verified["outcome_band"]
 
     @gl.public.write
-    def file_resolution_challenge(self, market_id: u256, counter_evidence_url: str) -> str:
-        """Stake a bond to challenge a provisional verdict inside the window."""
-        market = self._load_market(market_id)
-        now_step = _u(self.clock_step)
-        state = self._market_settlement_state(market, now_step)
+    def challenge_resolution(self, market_id: u256, counter_evidence_url: str) -> str:
+        """Bond backed rebuttal of a provisional verdict inside the window.
 
-        if market.status != STATUS_PROVISIONAL:
+        The challenge re-runs the same live comparative consensus over the
+        counter evidence in the same transaction. An upheld challenge
+        forfeits the bond into the market pot. An overturned challenge
+        leaves the bond with the challenger and replaces the provisional
+        verdict. Either outcome restarts the full challenge window, and no
+        pending challenge state ever persists, so finalization can never
+        race an unresolved rebuttal.
+        """
+        market = self._load_market(market_id)
+        now_epoch = _current_epoch()
+        if market.status != STATUS_CHALLENGE_WINDOW:
             _fail(ERROR_EXPECTED + " market is not in a challengeable state")
-        if not state["challenge_open"]:
+        if now_epoch > _u(market.challenge_deadline_epoch):
             _fail(ERROR_EXPECTED + " challenge window is already closed")
         if _u(market.challenge_count) >= MAX_CHALLENGES_PER_MARKET:
             _fail(ERROR_EXPECTED + " challenge limit reached for this market")
-        if _u(market.challenge_bond_locked) != 0:
-            _fail(ERROR_EXPECTED + " a challenge bond is already locked")
 
         counter_url = _sanitize_url(counter_evidence_url, "counter evidence")
         if counter_url.lower() == market.primary_source_url.lower():
@@ -857,9 +1088,25 @@ class ProphetGrid(gl.Contract):
         if balance < bond:
             _fail(ERROR_EXPECTED + " insufficient balance for the challenge bond")
 
+        primary_url = market.primary_source_url
+        question = market.question
+        criteria = market.resolution_criteria
+        original_outcome = market.provisional_outcome
+        window = _u(self.challenge_window_epochs)
         index = _u(market.challenge_count)
-        self.token_balances[challenger] = u256(balance - bond)
-        self.vault_custody_balance = u256(_u(self.vault_custody_balance) + bond)
+
+        result = _run_live_adjudication(primary_url, counter_url, question, criteria)
+        verified = _verify_consensus(result)
+
+        if verified["outcome_band"] == original_outcome:
+            self.token_balances[challenger] = u256(balance - bond)
+            self.vault_custody_balance = u256(_u(self.vault_custody_balance) + bond)
+            market.forfeit_pot = u256(_u(market.forfeit_pot) + bond)
+            record_status = CHALLENGE_UPHELD
+            bond_resolution = "FORFEITED_TO_MARKET_POT"
+        else:
+            record_status = CHALLENGE_OVERTURNED
+            bond_resolution = "REFUNDED_TO_CHALLENGER"
 
         record = ChallengeRecord(
             market_id=market_id,
@@ -867,77 +1114,16 @@ class ProphetGrid(gl.Contract):
             challenger=challenger,
             counter_evidence_url=counter_url,
             bond=u256(bond),
-            filed_at_step=u256(now_step),
-            status=CHALLENGE_PENDING,
-            original_outcome=market.provisional_outcome,
-            final_outcome="",
-            reviewed_at_step=u256(0),
+            filed_at_epoch=u256(now_epoch),
+            status=record_status,
+            original_outcome=original_outcome,
+            final_outcome=verified["outcome_band"],
+            reviewed_at_epoch=u256(now_epoch),
         )
         key = _challenge_key(market_id, index)
         self.challenges[key] = record
         self.challenge_keys.append(key)
 
-        market.challenge_count = u256(index + 1)
-        market.challenge_bond_locked = u256(bond)
-        market.status = STATUS_CHALLENGED
-        self._save_market(market)
-
-        return json.dumps(
-            {
-                "market_id": _u(market_id),
-                "challenge_index": index,
-                "bond": bond,
-                "status": CHALLENGE_PENDING,
-                "provisional_outcome": record.original_outcome,
-                "challenge_deadline_step": state["challenge_deadline_step"],
-                "vault_custody_balance": _u(self.vault_custody_balance),
-            }
-        )
-
-    @gl.public.write
-    def audit_resolution_challenge(self, market_id: u256) -> str:
-        """Re-run live consensus over the counter evidence. Permissionless."""
-        market = self._load_market(market_id)
-        if market.status != STATUS_CHALLENGED:
-            _fail(ERROR_EXPECTED + " there is no pending challenge to audit")
-        index = _u(market.challenge_count) - 1
-        if index < 0:
-            _fail(ERROR_EXPECTED + " challenge index is invalid")
-        key = _challenge_key(market_id, index)
-        if key not in self.challenges:
-            _fail(ERROR_EXPECTED + " challenge record is missing")
-        challenge = self.challenges[key]
-        if challenge.status != CHALLENGE_PENDING:
-            _fail(ERROR_EXPECTED + " challenge is already adjudicated")
-
-        primary_url = market.primary_source_url
-        counter_url = challenge.counter_evidence_url
-        question = market.question
-        criteria = market.resolution_criteria
-        original_outcome = market.provisional_outcome
-        bond = _u(challenge.bond)
-        challenger = challenge.challenger
-        now_step = _u(self.clock_step)
-        window = _u(self.challenge_window_steps)
-
-        result = _run_live_adjudication(primary_url, counter_url, question, criteria)
-        verified = _verify_consensus(result)
-
-        if verified["outcome_band"] == original_outcome:
-            market.forfeit_pot = u256(_u(market.forfeit_pot) + bond)
-            challenge.status = CHALLENGE_UPHELD
-            bond_resolution = "FORFEITED_TO_MARKET_POT"
-        else:
-            self.vault_custody_balance = u256(_u(self.vault_custody_balance) - bond)
-            self.token_balances[challenger] = u256(_u(self.token_balances.get(challenger, 0)) + bond)
-            challenge.status = CHALLENGE_OVERTURNED
-            bond_resolution = "REFUNDED_TO_CHALLENGER"
-
-        challenge.final_outcome = verified["outcome_band"]
-        challenge.reviewed_at_step = u256(now_step)
-        self.challenges[key] = challenge
-
-        market.challenge_bond_locked = u256(0)
         market.provisional_outcome = verified["outcome_band"]
         market.confidence_anchor = u256(verified["confidence_anchor"])
         market.source_authenticated = verified["source_authenticated"]
@@ -946,75 +1132,108 @@ class ProphetGrid(gl.Contract):
         market.evidence_digest = _evidence_digest(
             primary_url, counter_url, verified["outcome_band"], verified["confidence_anchor"]
         )
-        market.resolved_at_step = u256(now_step)
-        market.challenge_deadline_step = u256(now_step + window)
-        market.status = STATUS_PROVISIONAL
+        market.challenge_count = u256(index + 1)
+        market.resolved_at_epoch = u256(now_epoch)
+        market.challenge_deadline_epoch = u256(now_epoch + window)
+        market.status = STATUS_CHALLENGE_WINDOW
         self._save_market(market)
 
         return json.dumps(
             {
                 "market_id": _u(market_id),
                 "challenge_index": index,
+                "bond": bond,
                 "bond_resolution": bond_resolution,
+                "status": record_status,
                 "previous_outcome": original_outcome,
                 "outcome_band": verified["outcome_band"],
                 "confidence_anchor": verified["confidence_anchor"],
                 "source_authenticated": verified["source_authenticated"],
-                "challenge_deadline_step": now_step + window,
+                "challenge_deadline_epoch": now_epoch + window,
+                "vault_custody_balance": _u(self.vault_custody_balance),
             }
         )
 
     @gl.public.write
-    def finalize_market_settlement(self, market_id: u256) -> str:
-        """Close the challenge window and open pro rata claims."""
+    def finalize_market(self, market_id: u256) -> str:
+        """Close the challenge window and open claims or zero-winner refunds.
+
+        Finalization requires current_epoch strictly greater than
+        challenge_deadline_epoch, and the unified challenge flow guarantees
+        no pending rebuttal can ever race it. A funded market whose winning
+        side holds zero stake never locks its pot. It flips to
+        REFUNDABLE_ZERO_WINNERS and every principal becomes claimable
+        through claim_refund.
+        """
         market = self._load_market(market_id)
-        now_step = _u(self.clock_step)
+        now_epoch = _current_epoch()
+        if market.status == STATUS_FINALIZED:
+            _fail(ERROR_EXPECTED + " market is already finalized")
+        if market.status in REFUND_STATUSES:
+            _fail(ERROR_EXPECTED + " market is on a refund path, use claim_refund")
+        if market.status != STATUS_CHALLENGE_WINDOW:
+            _fail(ERROR_EXPECTED + " market has no provisional resolution to finalize")
 
-        if market.status == STATUS_CHALLENGED:
-            self._absorb_stalled_challenge(market, now_step)
-
-        state = self._market_settlement_state(market, now_step)
+        state = self._market_settlement_state(market, now_epoch)
         if not state["settlement_ready"]:
             _fail(ERROR_EXPECTED + " settlement refused: " + state["claim_block_reason"])
 
         outcome = market.provisional_outcome
         if outcome == OUTCOME_YES:
-            market.unclaimed_winner_shares = market.yes_pool
+            winning_pool = _u(market.yes_pool)
         elif outcome == OUTCOME_NO:
-            market.unclaimed_winner_shares = market.no_pool
+            winning_pool = _u(market.no_pool)
+        else:
+            winning_pool = -1
+
+        if winning_pool == 0:
+            market.unclaimed_refund_principal = u256(state["principal_pool"])
+            market.status = STATUS_REFUNDABLE_ZERO_WINNERS
+            settlement_status = STATUS_REFUNDABLE_ZERO_WINNERS
         elif outcome == OUTCOME_INVALID_REFUND:
             market.unclaimed_refund_principal = u256(_u(market.yes_pool) + _u(market.no_pool))
+            market.status = STATUS_FINALIZED
+            settlement_status = STATUS_FINALIZED
+        elif outcome in (OUTCOME_YES, OUTCOME_NO):
+            market.unclaimed_winner_shares = u256(winning_pool)
+            market.status = STATUS_FINALIZED
+            settlement_status = STATUS_FINALIZED
         else:
             _fail(ERROR_EXPECTED + " market has no provisional outcome to finalize")
 
-        market.status = STATUS_FINALIZED
-        market.finalized_at_step = u256(now_step)
+        market.finalized_at_epoch = u256(now_epoch)
         self._save_market(market)
 
         return json.dumps(
             {
                 "market_id": _u(market_id),
-                "status": STATUS_FINALIZED,
+                "status": settlement_status,
                 "outcome_band": outcome,
                 "total_pot": state["total_pot"],
-                "winning_pool": state["winning_pool"],
+                "winning_pool": max(winning_pool, 0),
                 "unclaimed_winner_shares": _u(market.unclaimed_winner_shares),
                 "unclaimed_refund_principal": _u(market.unclaimed_refund_principal),
                 "paid_out": _u(market.paid_out),
+                "refund_path_open": settlement_status == STATUS_REFUNDABLE_ZERO_WINNERS,
+                "finalized_at_epoch": now_epoch,
             }
         )
 
     @gl.public.write
     def claim_market_payout(self, market_id: u256) -> str:
-        """Pay the exact pro rata share. The last claimant absorbs dust."""
+        """Pay the exact pro rata share. The last claimant absorbs dust.
+
+        Only FINALIZED markets use this path. Refund paths for zero winner
+        and expired markets live in claim_refund.
+        """
         market = self._load_market(market_id)
-        now_step = _u(self.clock_step)
+        now_epoch = _current_epoch()
         trader = gl.message.sender_address
         key = _position_key(market_id, trader)
         if key in self.receipts:
             _fail(ERROR_EXPECTED + " payout already claimed for this position")
 
-        state = self._market_settlement_state(market, now_step)
+        state = self._market_settlement_state(market, now_epoch)
         if not state["claimable_now"]:
             _fail(ERROR_EXPECTED + " payout blocked: " + state["claim_block_reason"])
 
@@ -1070,7 +1289,7 @@ class ProphetGrid(gl.Contract):
             shares=u256(shares),
             principal=u256(principal),
             payout=u256(payout),
-            claimed_at_step=u256(now_step),
+            claimed_at_epoch=u256(now_epoch),
             digest=_evidence_digest(market.primary_source_url, market.evidence_url, outcome, _u(market.confidence_anchor)),
         )
         self.receipts[key] = receipt
@@ -1091,6 +1310,123 @@ class ProphetGrid(gl.Contract):
             }
         )
 
+    @gl.public.write
+    def expire_unresolved_market(self, market_id: u256) -> str:
+        """Flip a market left unresolved past its timeout onto the refund path.
+
+        Any participant can trigger this once current_epoch has reached
+        resolution_timeout_epoch while the market is still OPEN. A live
+        proposal cannot race the expiry: propose_resolution refuses at or
+        after the timeout epoch. No funds move here. The escrowed principals
+        simply become claimable at 100 percent through claim_refund, so an
+        abandoned or unresolvable market can never lock funds permanently.
+        """
+        market = self._load_market(market_id)
+        if market.status != STATUS_OPEN:
+            _fail(ERROR_EXPECTED + " only an unresolved open market can expire")
+        now_epoch = _current_epoch()
+        if now_epoch < _u(market.resolution_timeout_epoch):
+            _fail(ERROR_EXPECTED + " market is still inside its resolution grace period")
+
+        principal = _u(market.yes_pool) + _u(market.no_pool)
+        market.unclaimed_refund_principal = u256(principal)
+        market.status = STATUS_EXPIRED
+        market.resolution_summary = (
+            "Market was never resolved within the objective resolution window. "
+            "Every participant can reclaim the full staked principal via claim_refund."
+        )
+        self._save_market(market)
+
+        return json.dumps(
+            {
+                "market_id": _u(market_id),
+                "status": STATUS_EXPIRED,
+                "refundable_principal": principal,
+                "total_pot": principal + _u(market.forfeit_pot),
+                "current_epoch": now_epoch,
+                "vault_custody_balance": _u(self.vault_custody_balance),
+            }
+        )
+
+    @gl.public.write
+    def claim_refund(self, market_id: u256) -> str:
+        """Refund 100 percent of a staked principal on a refund path.
+
+        Covers REFUNDABLE_ZERO_WINNERS and EXPIRED markets. Every
+        participant receives their principal pro rata against the market
+        pot, forfeited challenge bonds included, and the last claimant
+        absorbs the rounding dust, so the remaining liability reaches
+        exactly zero wei with nothing locked.
+        """
+        market = self._load_market(market_id)
+        if market.status not in REFUND_STATUSES:
+            _fail(ERROR_EXPECTED + " market has no refund to claim")
+        now_epoch = _current_epoch()
+        trader = gl.message.sender_address
+        key = _position_key(market_id, trader)
+        if key in self.receipts:
+            _fail(ERROR_EXPECTED + " payout already claimed for this position")
+
+        state = self._market_settlement_state(market, now_epoch)
+        if not state["refund_claimable"]:
+            _fail(ERROR_EXPECTED + " refund blocked: " + state["claim_block_reason"])
+
+        yes = _u(self.yes_shares.get(key, 0))
+        no = _u(self.no_shares.get(key, 0))
+        principal = yes + no
+        if principal == 0:
+            _fail(ERROR_EXPECTED + " position has no principal to refund")
+        unclaimed = _u(market.unclaimed_refund_principal)
+        if principal > unclaimed:
+            _fail(ERROR_EXPECTED + " refund accounting mismatch")
+        if principal == unclaimed:
+            payout = state["remaining_liability"]
+        else:
+            payout = principal * state["total_pot"] // state["principal_pool"]
+        if payout <= 0:
+            _fail(ERROR_EXPECTED + " computed payout is zero")
+        if payout > state["remaining_liability"]:
+            _fail(ERROR_EXPECTED + " refund exceeds remaining liability")
+        vault = _u(self.vault_custody_balance)
+        if payout > vault:
+            _fail(ERROR_EXPECTED + " vault custody is insufficient for this refund")
+
+        self.vault_custody_balance = u256(vault - payout)
+        self.token_balances[trader] = u256(_u(self.token_balances.get(trader, 0)) + payout)
+        market.unclaimed_refund_principal = u256(unclaimed - principal)
+        market.paid_out = u256(_u(market.paid_out) + payout)
+        self._save_market(market)
+
+        receipt = PayoutReceipt(
+            market_id=market_id,
+            recipient=trader,
+            outcome=REFUND_RECEIPT_BAND,
+            shares=u256(0),
+            principal=u256(principal),
+            payout=u256(payout),
+            claimed_at_epoch=u256(now_epoch),
+            digest=_evidence_digest(
+                market.primary_source_url, market.evidence_url, market.status, _u(market.confidence_anchor)
+            ),
+        )
+        self.receipts[key] = receipt
+        self.receipt_keys.append(key)
+        self.total_paid_out = u256(_u(self.total_paid_out) + payout)
+
+        return json.dumps(
+            {
+                "market_id": _u(market_id),
+                "status": market.status,
+                "principal": principal,
+                "refund": payout,
+                "balance": _u(self.token_balances[trader]),
+                "remaining_liability": state["remaining_liability"] - payout,
+                "unclaimed_refund_principal": _u(market.unclaimed_refund_principal),
+                "vault_custody_balance": _u(self.vault_custody_balance),
+                "receipt_digest": receipt.digest,
+            }
+        )
+
     # ------------------------------------------------------------------
     # Read models
     # ------------------------------------------------------------------
@@ -1098,7 +1434,7 @@ class ProphetGrid(gl.Contract):
     @gl.public.view
     def get_market(self, market_id: u256) -> str:
         market = self._load_market(market_id)
-        return json.dumps(self._market_view(market, _u(self.clock_step)))
+        return json.dumps(self._market_view(market, _current_epoch()))
 
     @gl.public.view
     def get_market_count(self) -> u256:
@@ -1111,12 +1447,12 @@ class ProphetGrid(gl.Contract):
         if page_size < 1 or page_size > 50:
             _fail(ERROR_EXPECTED + " page size must be between 1 and 50")
         total = len(self.market_ids)
-        now_step = _u(self.clock_step)
+        now_epoch = _current_epoch()
         rows = []
         index = total - 1 - start_offset
         while index >= 0 and len(rows) < page_size:
             market = self.markets[self.market_ids[index]]
-            rows.append(self._market_view(market, now_step))
+            rows.append(self._market_view(market, now_epoch))
             index -= 1
         return json.dumps(
             {
@@ -1124,48 +1460,54 @@ class ProphetGrid(gl.Contract):
                 "offset": start_offset,
                 "limit": page_size,
                 "returned": len(rows),
-                "clock_step": now_step,
+                "current_epoch": now_epoch,
                 "markets": rows,
             }
         )
 
     @gl.public.view
     def get_platform_stats(self) -> str:
-        now_step = _u(self.clock_step)
+        now_epoch = _current_epoch()
         open_count = 0
-        provisional_count = 0
-        challenged_count = 0
+        challenge_window_count = 0
         finalized_count = 0
+        refundable_count = 0
+        expired_count = 0
         volume = 0
         for market_id in self.market_ids:
             market = self.markets[market_id]
-            state = self._market_settlement_state(market, now_step)
+            state = self._market_settlement_state(market, now_epoch)
             volume += state["total_pot"]
             if market.status == STATUS_OPEN:
                 open_count += 1
-            elif market.status == STATUS_PROVISIONAL:
-                provisional_count += 1
-            elif market.status == STATUS_CHALLENGED:
-                challenged_count += 1
+            elif market.status == STATUS_CHALLENGE_WINDOW:
+                challenge_window_count += 1
             elif market.status == STATUS_FINALIZED:
                 finalized_count += 1
-        invariants = self._vault_invariant_report(now_step)
+            elif market.status == STATUS_REFUNDABLE_ZERO_WINNERS:
+                refundable_count += 1
+            elif market.status == STATUS_EXPIRED:
+                expired_count += 1
+        invariants = self._vault_invariant_report(now_epoch)
         return json.dumps(
             {
                 "token_symbol": self.token_symbol,
                 "token_name": self.token_name,
                 "total_markets": len(self.market_ids),
                 "open_markets": open_count,
-                "provisional_markets": provisional_count,
-                "challenged_markets": challenged_count,
+                "challenge_window_markets": challenge_window_count,
                 "finalized_markets": finalized_count,
+                "refundable_zero_winner_markets": refundable_count,
+                "expired_markets": expired_count,
                 "total_volume": _u(self.total_volume),
                 "total_pot_locked": volume,
                 "total_paid_out": _u(self.total_paid_out),
                 "tvl": _u(self.vault_custody_balance),
                 "total_supply": _u(self.total_supply),
-                "clock_step": now_step,
-                "challenge_window_steps": _u(self.challenge_window_steps),
+                "current_epoch": now_epoch,
+                "epoch_seconds": EPOCH_SECONDS,
+                "challenge_window_epochs": _u(self.challenge_window_epochs),
+                "resolution_grace_epochs": _u(self.resolution_grace_epochs),
                 "challenge_bond_amount": _u(self.challenge_bond_amount),
                 "runner_pin": RUNNER_PIN,
                 "invariant_ok": invariants["ok"],
@@ -1177,7 +1519,7 @@ class ProphetGrid(gl.Contract):
     @gl.public.view
     def get_trader_portfolio(self, trader: str) -> str:
         account = _coerce_address(trader)
-        now_step = _u(self.clock_step)
+        now_epoch = _current_epoch()
         positions = []
         for market_id in self.market_ids:
             key = _position_key(market_id, account)
@@ -1186,7 +1528,7 @@ class ProphetGrid(gl.Contract):
             if yes == 0 and no == 0:
                 continue
             market = self.markets[market_id]
-            state = self._market_settlement_state(market, now_step)
+            state = self._market_settlement_state(market, now_epoch)
             quote = self._payout_quote(market, state, yes, no, key in self.receipts)
             positions.append(
                 {
@@ -1199,6 +1541,7 @@ class ProphetGrid(gl.Contract):
                     "no_shares": no,
                     "principal": yes + no,
                     "claimable": quote["claimable"],
+                    "claim_path": quote["claim_path"],
                     "payout_quote": quote["payout"],
                     "claimed": quote["claimed"],
                     "claim_block_reason": state["claim_block_reason"],
@@ -1210,7 +1553,7 @@ class ProphetGrid(gl.Contract):
                 "balance": _u(self.token_balances.get(account, 0)),
                 "position_count": len(positions),
                 "positions": positions,
-                "clock_step": now_step,
+                "current_epoch": now_epoch,
             }
         )
 
@@ -1218,8 +1561,8 @@ class ProphetGrid(gl.Contract):
     def preview_payout(self, market_id: u256, trader: str) -> str:
         market = self._load_market(market_id)
         account = _coerce_address(trader)
-        now_step = _u(self.clock_step)
-        state = self._market_settlement_state(market, now_step)
+        now_epoch = _current_epoch()
+        state = self._market_settlement_state(market, now_epoch)
         key = _position_key(market_id, account)
         yes = _u(self.yes_shares.get(key, 0))
         no = _u(self.no_shares.get(key, 0))
@@ -1257,6 +1600,7 @@ class ProphetGrid(gl.Contract):
                 "payout_is_final": quote["final"],
                 "is_last_claimant": quote["is_last_claimant"],
                 "payout_basis": quote["basis"],
+                "claim_path": quote["claim_path"],
                 "claim_block_reason": state["claim_block_reason"],
                 "projected_payout_if_yes": projected_yes,
                 "projected_payout_if_no": projected_no,
@@ -1265,20 +1609,20 @@ class ProphetGrid(gl.Contract):
                 "winning_pool": state["winning_pool"],
                 "remaining_liability": state["remaining_liability"],
                 "challenge_open": state["challenge_open"],
-                "countdown_steps": state["countdown_steps"],
-                "clock_step": now_step,
+                "countdown_epochs": state["countdown_epochs"],
+                "current_epoch": now_epoch,
             }
         )
 
     @gl.public.view
     def check_vault_invariants(self) -> str:
-        return json.dumps(self._vault_invariant_report(_u(self.clock_step)))
+        return json.dumps(self._vault_invariant_report(_current_epoch()))
 
     @gl.public.view
     def get_resolution_receipt(self, market_id: u256) -> str:
         market = self._load_market(market_id)
-        now_step = _u(self.clock_step)
-        state = self._market_settlement_state(market, now_step)
+        now_epoch = _current_epoch()
+        state = self._market_settlement_state(market, now_epoch)
         challenges = []
         index = 0
         while index < _u(market.challenge_count):
@@ -1291,8 +1635,8 @@ class ProphetGrid(gl.Contract):
                         "challenger": record.challenger.as_hex,
                         "bond": _u(record.bond),
                         "status": record.status,
-                        "filed_at_step": _u(record.filed_at_step),
-                        "reviewed_at_step": _u(record.reviewed_at_step),
+                        "filed_at_epoch": _u(record.filed_at_epoch),
+                        "reviewed_at_epoch": _u(record.reviewed_at_epoch),
                         "original_outcome": record.original_outcome,
                         "final_outcome": record.final_outcome,
                         "counter_evidence_url": record.counter_evidence_url,
@@ -1312,10 +1656,12 @@ class ProphetGrid(gl.Contract):
                 "primary_source_url": market.primary_source_url,
                 "evidence_url": market.evidence_url,
                 "evidence_digest": market.evidence_digest,
-                "resolved_at_step": state["resolved_at_step"],
-                "challenge_deadline_step": state["challenge_deadline_step"],
+                "resolved_at_epoch": state["resolved_at_epoch"],
+                "close_epoch": state["close_epoch"],
+                "resolution_timeout_epoch": state["resolution_timeout_epoch"],
+                "challenge_deadline_epoch": state["challenge_deadline_epoch"],
                 "challenge_open": state["challenge_open"],
-                "countdown_steps": state["countdown_steps"],
+                "countdown_epochs": state["countdown_epochs"],
                 "challenges": challenges,
                 "consensus": "gl.eq_principle.prompt_comparative",
                 "principle": RESOLUTION_PRINCIPLE,
@@ -1327,7 +1673,7 @@ class ProphetGrid(gl.Contract):
                 "document_char_limit": MAX_DOCUMENT_CHARS,
                 "runner_pin": RUNNER_PIN,
                 "evidence_sources": ["primary_source_url", "submitted_evidence_url"],
-                "challenge_window_steps": _u(self.challenge_window_steps),
+                "challenge_window_epochs": _u(self.challenge_window_epochs),
                 "challenge_bond_amount": _u(self.challenge_bond_amount),
             }
         )
@@ -1345,8 +1691,8 @@ class ProphetGrid(gl.Contract):
                 "challenger": record.challenger.as_hex,
                 "bond": _u(record.bond),
                 "status": record.status,
-                "filed_at_step": _u(record.filed_at_step),
-                "reviewed_at_step": _u(record.reviewed_at_step),
+                "filed_at_epoch": _u(record.filed_at_epoch),
+                "reviewed_at_epoch": _u(record.reviewed_at_epoch),
                 "original_outcome": record.original_outcome,
                 "final_outcome": record.final_outcome,
                 "counter_evidence_url": record.counter_evidence_url,
@@ -1369,7 +1715,7 @@ class ProphetGrid(gl.Contract):
                 "shares": _u(receipt.shares),
                 "principal": _u(receipt.principal),
                 "payout": _u(receipt.payout),
-                "claimed_at_step": _u(receipt.claimed_at_step),
+                "claimed_at_epoch": _u(receipt.claimed_at_epoch),
                 "digest": receipt.digest,
             }
         )
@@ -1383,13 +1729,13 @@ class ProphetGrid(gl.Contract):
                 "privileged_roles": 0,
                 "owner_only_methods": [],
                 "creator_only_methods": [],
-                "resolution_path": "resolve_market_live uses gl.nondet.web.render and gl.eq_principle.prompt_comparative, then a deterministic post consensus re-verification",
-                "reaudit_path": "audit_resolution_challenge re-runs the same comparative consensus over counter evidence",
-                "settlement_path": "finalize_market_settlement is permissionless and only opens claims after the challenge window",
-                "claim_path": "claim_market_payout is permissionless and pays the caller only",
-                "liveness_valve": "a challenge that never reaches consensus before the grace deadline converts the market to a principal refund and returns the bond",
-                "market_creation": "permissionless",
-                "clock": "permissionless bounded advance_market_clock",
+                "resolution_path": "propose_resolution is gated on close_epoch <= current_epoch < resolution_timeout_epoch, then uses gl.nondet.web.render and gl.eq_principle.prompt_comparative with a deterministic post consensus re-verification",
+                "challenge_path": "challenge_resolution locks the market in CHALLENGE_WINDOW, re-runs the same comparative consensus over counter evidence in one transaction and restarts the window",
+                "settlement_path": "finalize_market is permissionless and only unlocks after current_epoch > challenge_deadline_epoch, routing zero-winner pots to REFUNDABLE_ZERO_WINNERS",
+                "claim_path": "claim_market_payout pays winners, claim_refund pays 100 percent principal on REFUNDABLE_ZERO_WINNERS and EXPIRED markets",
+                "expiry_path": "expire_unresolved_market converts a market left unresolved at resolution_timeout_epoch onto the refund path",
+                "market_creation": "permissionless with bounded duration_epochs",
+                "clock": "no advanceable clock. current_epoch derives from the objective transaction datetime of the finalized block. advance_market_clock always reverts",
             }
         )
 
@@ -1424,8 +1770,13 @@ class ProphetGrid(gl.Contract):
     def _save_market(self, market: MarketRecord) -> None:
         self.markets[market.market_id] = market
 
-    def _market_settlement_state(self, market: MarketRecord, now_step: int) -> dict:
-        """Single source of truth for every settlement read path."""
+    def _market_settlement_state(self, market: MarketRecord, now_epoch: int) -> dict:
+        """Single source of truth for every settlement read path.
+
+        Every gate is expressed against the objective current_epoch so the
+        display, the claim guards and the settlement writes can never
+        disagree about which phase a market is in.
+        """
         yes_pool = _u(market.yes_pool)
         no_pool = _u(market.no_pool)
         forfeit_pot = _u(market.forfeit_pot)
@@ -1434,39 +1785,43 @@ class ProphetGrid(gl.Contract):
         remaining = total_pot - paid_out
         if remaining < 0:
             remaining = 0
-        deadline = _u(market.challenge_deadline_step)
-        bond_locked = _u(market.challenge_bond_locked)
+        close = _u(market.close_epoch)
+        timeout = _u(market.resolution_timeout_epoch)
+        deadline = _u(market.challenge_deadline_epoch)
         status = market.status
         outcome = market.provisional_outcome
 
-        challenge_open = status == STATUS_PROVISIONAL and now_step < deadline
-        settlement_ready = status == STATUS_PROVISIONAL and now_step >= deadline and bond_locked == 0
+        trading_open = status == STATUS_OPEN and now_epoch < close
+        expiry_ready = status == STATUS_OPEN and now_epoch >= timeout
+        challenge_open = status == STATUS_CHALLENGE_WINDOW and now_epoch <= deadline
+        settlement_ready = status == STATUS_CHALLENGE_WINDOW and now_epoch > deadline
         claimable = status == STATUS_FINALIZED and remaining > 0
-        countdown = deadline - now_step
+        refund_claimable = status in REFUND_STATUSES and remaining > 0
+        countdown = deadline - now_epoch
         if countdown < 0:
             countdown = 0
 
         if status == STATUS_OPEN:
-            phase = PHASE_TRADING
-        elif status == STATUS_CHALLENGED:
-            phase = PHASE_REAUDIT_PENDING
+            phase = PHASE_TRADING if trading_open else PHASE_CLOSED_WAITING_RESOLUTION
+        elif status == STATUS_CHALLENGE_WINDOW:
+            phase = PHASE_CHALLENGE_WINDOW if challenge_open else PHASE_READY_TO_FINALIZE
         elif status == STATUS_FINALIZED:
             phase = PHASE_SETTLED
-        elif settlement_ready:
-            phase = PHASE_READY_TO_FINALIZE
+        elif status == STATUS_REFUNDABLE_ZERO_WINNERS:
+            phase = PHASE_ZERO_WINNER_REFUND
         else:
-            phase = PHASE_CHALLENGE_WINDOW
+            phase = PHASE_EXPIRED_REFUND
 
         if status == STATUS_FINALIZED:
             block_reason = "CLAIMABLE" if remaining > 0 else "POOL_EXHAUSTED"
-        elif status == STATUS_PROVISIONAL and challenge_open:
-            block_reason = "CHALLENGE_WINDOW_OPEN"
-        elif status == STATUS_PROVISIONAL:
-            block_reason = "AWAITING_FINALIZATION"
-        elif status == STATUS_CHALLENGED:
-            block_reason = "REAUDIT_PENDING"
+        elif status == STATUS_CHALLENGE_WINDOW:
+            block_reason = "CHALLENGE_WINDOW_OPEN" if challenge_open else "AWAITING_FINALIZATION"
+        elif status == STATUS_OPEN:
+            block_reason = "EXPIRY_READY" if expiry_ready else "MARKET_OPEN"
+        elif status == STATUS_REFUNDABLE_ZERO_WINNERS:
+            block_reason = "ZERO_WINNER_REFUND_READY"
         else:
-            block_reason = "MARKET_OPEN"
+            block_reason = "EXPIRED_REFUND_READY"
 
         principal_pool = yes_pool + no_pool
         winning_side = "NONE"
@@ -1485,7 +1840,7 @@ class ProphetGrid(gl.Contract):
 
         if winning_pool > 0 and outcome in (OUTCOME_YES, OUTCOME_NO):
             payout_multiple_ppm = total_pot * 1000000 // winning_pool
-        elif principal_pool > 0 and outcome == OUTCOME_INVALID_REFUND:
+        elif principal_pool > 0 and (outcome == OUTCOME_INVALID_REFUND or status in REFUND_STATUSES):
             payout_multiple_ppm = total_pot * 1000000 // principal_pool
         else:
             payout_multiple_ppm = 0
@@ -1504,16 +1859,20 @@ class ProphetGrid(gl.Contract):
             "principal_pool": principal_pool,
             "winning_side": winning_side,
             "winning_pool": winning_pool,
+            "trading_open": trading_open,
+            "expiry_ready": expiry_ready,
             "challenge_open": challenge_open,
-            "challenge_deadline_step": deadline,
-            "challenge_bond_locked": bond_locked,
-            "countdown_steps": countdown,
             "settlement_ready": settlement_ready,
             "claimable_now": claimable,
+            "refund_claimable": refund_claimable,
+            "close_epoch": close,
+            "resolution_timeout_epoch": timeout,
+            "challenge_deadline_epoch": deadline,
+            "resolved_at_epoch": _u(market.resolved_at_epoch),
+            "countdown_epochs": countdown,
             "claim_block_reason": block_reason,
             "confidence_anchor": _u(market.confidence_anchor),
             "source_authenticated": market.source_authenticated,
-            "resolved_at_step": _u(market.resolved_at_step),
             "unclaimed_winner_shares": _u(market.unclaimed_winner_shares),
             "unclaimed_refund_principal": _u(market.unclaimed_refund_principal),
             "implied_yes_prob_bps": implied_yes_bps,
@@ -1523,18 +1882,32 @@ class ProphetGrid(gl.Contract):
     def _payout_quote(self, market: MarketRecord, state: dict, yes: int, no: int, claimed: bool) -> dict:
         principal = yes + no
         outcome = state["outcome"]
-        if outcome == OUTCOME_INVALID_REFUND:
+        status = state["status"]
+
+        if status in REFUND_STATUSES:
+            claim_path = "claim_refund"
             basis = principal
             pool = state["principal_pool"]
             unclaimed = state["unclaimed_refund_principal"]
-        elif outcome == OUTCOME_YES:
+            claimable_now = state["refund_claimable"]
+        elif status == STATUS_FINALIZED and outcome == OUTCOME_INVALID_REFUND:
+            claim_path = "claim_market_payout"
+            basis = principal
+            pool = state["principal_pool"]
+            unclaimed = state["unclaimed_refund_principal"]
+            claimable_now = state["claimable_now"]
+        elif status == STATUS_FINALIZED and outcome == OUTCOME_YES:
+            claim_path = "claim_market_payout"
             basis = yes
             pool = state["winning_pool"]
             unclaimed = state["unclaimed_winner_shares"]
-        elif outcome == OUTCOME_NO:
+            claimable_now = state["claimable_now"]
+        elif status == STATUS_FINALIZED and outcome == OUTCOME_NO:
+            claim_path = "claim_market_payout"
             basis = no
             pool = state["winning_pool"]
             unclaimed = state["unclaimed_winner_shares"]
+            claimable_now = state["claimable_now"]
         else:
             return {
                 "claimable": False,
@@ -1543,6 +1916,7 @@ class ProphetGrid(gl.Contract):
                 "is_last_claimant": False,
                 "claimed": claimed,
                 "final": False,
+                "claim_path": "none",
             }
 
         if claimed or basis <= 0 or pool <= 0 or state["total_pot"] <= 0:
@@ -1552,11 +1926,12 @@ class ProphetGrid(gl.Contract):
                 "basis": basis,
                 "is_last_claimant": False,
                 "claimed": claimed,
-                "final": state["status"] == STATUS_FINALIZED,
+                "final": status == STATUS_FINALIZED or status in REFUND_STATUSES,
+                "claim_path": claim_path,
             }
 
         is_last = False
-        if state["status"] == STATUS_FINALIZED and unclaimed > 0:
+        if unclaimed > 0:
             if basis >= unclaimed:
                 payout = state["remaining_liability"]
                 is_last = True
@@ -1568,16 +1943,17 @@ class ProphetGrid(gl.Contract):
             final = False
 
         return {
-            "claimable": state["claimable_now"],
+            "claimable": claimable_now,
             "payout": payout,
             "basis": basis,
             "is_last_claimant": is_last,
             "claimed": claimed,
             "final": final,
+            "claim_path": claim_path,
         }
 
-    def _market_view(self, market: MarketRecord, now_step: int) -> dict:
-        state = self._market_settlement_state(market, now_step)
+    def _market_view(self, market: MarketRecord, now_epoch: int) -> dict:
+        state = self._market_settlement_state(market, now_epoch)
         return {
             "market_id": state["market_id"],
             "question": market.question,
@@ -1598,14 +1974,18 @@ class ProphetGrid(gl.Contract):
             "resolution_summary": market.resolution_summary,
             "evidence_url": market.evidence_url,
             "evidence_digest": market.evidence_digest,
-            "resolved_at_step": state["resolved_at_step"],
-            "challenge_deadline_step": state["challenge_deadline_step"],
+            "close_epoch": state["close_epoch"],
+            "resolution_timeout_epoch": state["resolution_timeout_epoch"],
+            "resolved_at_epoch": state["resolved_at_epoch"],
+            "challenge_deadline_epoch": state["challenge_deadline_epoch"],
             "challenge_open": state["challenge_open"],
             "challenge_count": _u(market.challenge_count),
-            "challenge_bond_locked": state["challenge_bond_locked"],
-            "countdown_steps": state["countdown_steps"],
+            "countdown_epochs": state["countdown_epochs"],
+            "trading_open": state["trading_open"],
+            "expiry_ready": state["expiry_ready"],
             "settlement_ready": state["settlement_ready"],
             "claimable_now": state["claimable_now"],
+            "refund_claimable": state["refund_claimable"],
             "claim_block_reason": state["claim_block_reason"],
             "implied_yes_prob_bps": state["implied_yes_prob_bps"],
             "payout_multiple_ppm": state["payout_multiple_ppm"],
@@ -1615,72 +1995,27 @@ class ProphetGrid(gl.Contract):
             "unclaimed_winner_shares": state["unclaimed_winner_shares"],
             "unclaimed_refund_principal": state["unclaimed_refund_principal"],
             "trade_count": _u(market.trade_count),
-            "created_at_step": _u(market.created_at_step),
-            "finalized_at_step": _u(market.finalized_at_step),
-            "clock_step": now_step,
+            "created_at_epoch": _u(market.created_at_epoch),
+            "finalized_at_epoch": _u(market.finalized_at_epoch),
+            "current_epoch": now_epoch,
         }
 
-    def _vault_invariant_report(self, now_step: int) -> dict:
+    def _vault_invariant_report(self, now_epoch: int) -> dict:
         locked_pots = 0
         for market_id in self.market_ids:
             market = self.markets[market_id]
-            state = self._market_settlement_state(market, now_step)
+            state = self._market_settlement_state(market, now_epoch)
             locked_pots += state["remaining_liability"]
-        active_bonds = 0
-        for key in self.challenge_keys:
-            if key in self.challenges:
-                challenge = self.challenges[key]
-                if challenge.status == CHALLENGE_PENDING:
-                    active_bonds += _u(challenge.bond)
         vault = _u(self.vault_custody_balance)
-        expected = locked_pots + active_bonds
+        expected = locked_pots
         return {
             "ok": vault == expected,
             "vault_custody_balance": vault,
             "locked_market_pots": locked_pots,
-            "active_challenge_bonds": active_bonds,
+            "active_challenge_bonds": 0,
             "expected_custody": expected,
             "delta": vault - expected,
             "market_count": len(self.market_ids),
             "challenge_count": len(self.challenge_keys),
-            "clock_step": now_step,
+            "current_epoch": now_epoch,
         }
-
-    def _absorb_stalled_challenge(self, market: MarketRecord, now_step: int) -> None:
-        """Fail safe valve for a challenge that never reaches consensus.
-
-        This path never picks a winner. It refunds principal and returns the
-        bond, and it only unlocks after the window plus one grace window.
-        """
-        deadline = _u(market.challenge_deadline_step)
-        grace = deadline + _u(self.challenge_window_steps)
-        if now_step < grace:
-            _fail(ERROR_EXPECTED + " re-audit is still pending, settlement stays locked")
-
-        index = _u(market.challenge_count) - 1
-        if index >= 0:
-            key = _challenge_key(market.market_id, index)
-            if key in self.challenges:
-                challenge = self.challenges[key]
-                if challenge.status == CHALLENGE_PENDING:
-                    bond = _u(challenge.bond)
-                    if bond > 0:
-                        self.vault_custody_balance = u256(_u(self.vault_custody_balance) - bond)
-                        holder = challenge.challenger
-                        self.token_balances[holder] = u256(_u(self.token_balances.get(holder, 0)) + bond)
-                    challenge.status = CHALLENGE_ABORTED
-                    challenge.reviewed_at_step = u256(now_step)
-                    challenge.final_outcome = OUTCOME_INVALID_REFUND
-                    self.challenges[key] = challenge
-
-        market.challenge_bond_locked = u256(0)
-        market.provisional_outcome = OUTCOME_INVALID_REFUND
-        market.source_authenticated = False
-        market.confidence_anchor = u256(0)
-        market.resolution_summary = (
-            "Re-audit did not reach validator consensus before the grace deadline. "
-            "Principal is refunded and the challenge bond is returned."
-        )
-        market.challenge_deadline_step = u256(now_step)
-        market.status = STATUS_PROVISIONAL
-        self._save_market(market)

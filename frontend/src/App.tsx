@@ -39,7 +39,9 @@ import { CreateMarketModal } from "./components/CreateMarketModal";
 import { Toasts, type ToastItem } from "./components/Toasts";
 
 type Tab = "market" | "whatif" | "guards" | "wallet";
-type Filter = "ALL" | "OPEN" | "PROVISIONAL" | "FINALIZED";
+type Filter = "ALL" | "OPEN" | "CHALLENGE_WINDOW" | "FINALIZED" | "REFUND";
+
+const REFUND_STATUSES = ["REFUNDABLE_ZERO_WINNERS", "EXPIRED"];
 
 const TAB_META: { id: Tab; label: string; icon: typeof Gavel }[] = [
   { id: "market", label: "Market", icon: Gavel },
@@ -95,7 +97,7 @@ export default function App() {
         setSelectedId((current) => {
           if (current !== null && page.markets.some((market) => market.market_id === current)) return current;
           const preferred =
-            page.markets.find((market) => market.status === "PROVISIONAL" && market.challenge_open) ??
+            page.markets.find((market) => market.status === "CHALLENGE_WINDOW" && market.challenge_open) ??
             page.markets.find((market) => market.status === "OPEN") ??
             page.markets[0];
           return preferred ? preferred.market_id : null;
@@ -134,6 +136,7 @@ export default function App() {
 
   const filtered = useMemo(() => {
     if (filter === "ALL") return markets;
+    if (filter === "REFUND") return markets.filter((market) => REFUND_STATUSES.includes(market.status));
     return markets.filter((market) => market.status === filter);
   }, [markets, filter]);
 
@@ -218,7 +221,7 @@ export default function App() {
   const probeGuard = useCallback(
     async (kind: GuardKind): Promise<string | null> => {
       if (!client || !requireSigner()) return null;
-      const provisional = markets.find((market) => market.status === "PROVISIONAL" && market.challenge_open);
+      const provisional = markets.find((market) => market.status === "CHALLENGE_WINDOW" && market.challenge_open);
       const finalized = markets.find((market) => market.status === "FINALIZED");
       const expectation =
         kind === "premature"
@@ -230,7 +233,7 @@ export default function App() {
       try {
         if (kind === "injection") {
           if (!provisional) return null;
-          await writeTx(client, "file_resolution_challenge", [provisional.market_id, "javascript:alert(1)"]);
+          await writeTx(client, "challenge_resolution", [provisional.market_id, "javascript:alert(1)"]);
         } else if (kind === "premature") {
           if (!provisional) return null;
           await writeTx(client, "claim_market_payout", [provisional.market_id]);
@@ -286,11 +289,11 @@ export default function App() {
   }, [muted]);
 
   const onCreateMarket = useCallback(
-    async (question: string, category: string, primary: string, criteria: string) => {
+    async (question: string, category: string, primary: string, criteria: string, durationEpochs: number) => {
       await runWrite(
         "create",
         "create_market",
-        (activeClient) => writeTx(activeClient, "create_market", [question, category, primary, criteria]),
+        (activeClient) => writeTx(activeClient, "create_market", [question, category, primary, criteria, durationEpochs]),
         { successTitle: "Market created", confetti: true },
       );
       setCreateOpen(false);
@@ -298,7 +301,6 @@ export default function App() {
     [runWrite],
   );
 
-  const activeBonds = stats?.active_challenge_bonds ?? 0;
   const provisionalCount = markets.filter((market) => market.challenge_open).length;
   const lockedPots = markets.reduce((total, market) => total + market.remaining_liability, 0);
   const marketsPageComplete = markets.length >= (stats?.total_markets ?? 0);
@@ -332,11 +334,11 @@ export default function App() {
             <BadgeCheck size={11} className="text-yes" /> privileged roles {stats?.privileged_roles ?? 0}
           </span>
           <span className="flex items-center gap-1.5">
-            <Activity size={11} className="text-violet" /> clock step {stats?.clock_step ?? 0}
+            <Activity size={11} className="text-violet" /> epoch {stats?.current_epoch ?? 0} ({(stats?.epoch_seconds ?? 60)}s block time)
           </span>
           <span className="flex items-center gap-1.5">
             <ShieldCheck size={11} className={stats?.invariant_ok ? "text-yes" : "text-danger"} />
-            custody {formatExact(stats?.tvl ?? 0)} = pots + bonds {formatExact(activeBonds)}
+            custody {formatExact(stats?.tvl ?? 0)} = locked pots
           </span>
           <span className="ml-auto hidden font-mono text-[9px] lg:inline">runner {RUNNER_PIN}</span>
         </div>
@@ -391,7 +393,11 @@ export default function App() {
                 value={`${formatExact(lockedPots)}${marketsPageComplete ? "" : "+"}`}
                 tone="text-yes"
               />
-              <InvariantRow label="active challenge bonds" value={formatExact(activeBonds)} tone="text-amber" />
+              <InvariantRow
+                label="refund ready markets"
+                value={`${(stats?.refundable_zero_winner_markets ?? 0) + (stats?.expired_markets ?? 0)}`}
+                tone="text-orange-300"
+              />
               <div className="border-t border-line/70 pt-2">
                 <InvariantRow
                   label="sum check"
@@ -401,9 +407,9 @@ export default function App() {
               </div>
             </div>
             <div className="mt-3 rounded border border-line/70 bg-obsidian/50 p-2 font-mono text-[9px] leading-relaxed text-muted">
-              vault == pots + bonds
+              vault == locked pots (exact wei)
               <br />
-              no owner, no admin, no emergency settle
+              no owner, no admin, no advanceable clock
             </div>
           </div>
         </section>
@@ -416,7 +422,7 @@ export default function App() {
                 {markets.length} loaded
               </span>
               <div className="ml-2 flex gap-1">
-                {(["ALL", "OPEN", "PROVISIONAL", "FINALIZED"] as Filter[]).map((option) => (
+                {(["ALL", "OPEN", "CHALLENGE_WINDOW", "FINALIZED", "REFUND"] as Filter[]).map((option) => (
                   <button
                     key={option}
                     onClick={() => {
@@ -484,18 +490,18 @@ export default function App() {
 
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <InfoTile
-                title="Live resolution"
-                body="resolve_market_live renders both sources, sanitizes them, and asks validators to agree on the band."
+                title="Objective timing"
+                body="Epochs derive from block datetime. Trading stops at close_epoch, resolution opens at close_epoch, and finalize waits for the full challenge window. advance_market_clock always reverts."
                 tone="border-yes/25"
               />
               <InfoTile
-                title="Challenge and re-audit"
-                body="A bonded challenge opens a second live audit. The pot and bond stay locked in custody until settlement."
+                title="Challenge and rebuttal"
+                body="challenge_resolution reruns live consensus on counter evidence inside the window. The pot stays locked in custody until the window strictly elapses."
                 tone="border-amber/25"
               />
               <InfoTile
-                title="Exact payouts"
-                body="Pro rata payouts conserve rounding dust to the last claimant, so sum(payouts) equals the pot."
+                title="Refund paths"
+                body="Zero winner markets flip to REFUNDABLE_ZERO_WINNERS and abandoned markets can be expired after the resolution timeout. claim_refund returns 100 percent of principal."
                 tone="border-no/25"
               />
             </div>
@@ -544,33 +550,37 @@ export default function App() {
                     { confetti: true, successTitle: "Payout claimed" },
                   )
                 }
-                onChallenge={(url) =>
+                onClaimRefund={() =>
                   selected &&
-                  void runWrite("challenge", "file_resolution_challenge", (activeClient) =>
-                    writeTx(activeClient, "file_resolution_challenge", [selected.market_id, url]),
+                  void runWrite(
+                    "refund",
+                    "claim_refund",
+                    (activeClient) => writeTx(activeClient, "claim_refund", [selected.market_id]),
+                    { confetti: true, successTitle: "Refund claimed" },
                   )
                 }
-                onAudit={() =>
+                onExpire={() =>
                   selected &&
-                  void runWrite("audit", "audit_resolution_challenge", (activeClient) =>
-                    writeTx(activeClient, "audit_resolution_challenge", [selected.market_id]),
+                  void runWrite("expire", "expire_unresolved_market", (activeClient) =>
+                    writeTx(activeClient, "expire_unresolved_market", [selected.market_id]),
+                  )
+                }
+                onChallenge={(url) =>
+                  selected &&
+                  void runWrite("challenge", "challenge_resolution", (activeClient) =>
+                    writeTx(activeClient, "challenge_resolution", [selected.market_id, url]),
                   )
                 }
                 onResolve={(url) =>
                   selected &&
-                  void runWrite("resolve", "resolve_market_live", (activeClient) =>
-                    writeTx(activeClient, "resolve_market_live", [selected.market_id, url]),
+                  void runWrite("resolve", "propose_resolution", (activeClient) =>
+                    writeTx(activeClient, "propose_resolution", [selected.market_id, url]),
                   )
                 }
                 onFinalize={() =>
                   selected &&
-                  void runWrite("finalize", "finalize_market_settlement", (activeClient) =>
-                    writeTx(activeClient, "finalize_market_settlement", [selected.market_id]),
-                  )
-                }
-                onTick={() =>
-                  void runWrite("tick", "advance_market_clock", (activeClient) =>
-                    writeTx(activeClient, "advance_market_clock", [1]),
+                  void runWrite("finalize", "finalize_market", (activeClient) =>
+                    writeTx(activeClient, "finalize_market", [selected.market_id]),
                   )
                 }
                 onInspect={openConsensus}
@@ -630,7 +640,7 @@ export default function App() {
         open={createOpen}
         busy={busy === "create"}
         onClose={() => setCreateOpen(false)}
-        onCreate={(question, category, primary, criteria) => void onCreateMarket(question, category, primary, criteria)}
+        onCreate={(question, category, primary, criteria, durationEpochs) => void onCreateMarket(question, category, primary, criteria, durationEpochs)}
       />
       <Toasts items={toasts} onDismiss={(id) => setToasts((current) => current.filter((item) => item.id !== id))} />
     </div>

@@ -32,12 +32,14 @@ export function statusTone(status: string): { label: string; className: string; 
   switch (status) {
     case "OPEN":
       return { label: "TRADING", className: "text-yes border-yes/40 bg-yes/10", dot: "bg-yes" };
-    case "PROVISIONAL":
+    case "CHALLENGE_WINDOW":
       return { label: "CHALLENGE WINDOW", className: "text-amber border-amber/40 bg-amber/10", dot: "bg-amber" };
-    case "CHALLENGED":
-      return { label: "RE-AUDIT PENDING", className: "text-orange-300 border-orange-400/40 bg-orange-400/10", dot: "bg-orange-400" };
     case "FINALIZED":
       return { label: "SETTLED", className: "text-violet border-violet/40 bg-violet/10", dot: "bg-violet" };
+    case "REFUNDABLE_ZERO_WINNERS":
+      return { label: "ZERO WINNER REFUND", className: "text-orange-300 border-orange-400/40 bg-orange-400/10", dot: "bg-orange-400" };
+    case "EXPIRED":
+      return { label: "EXPIRED REFUND", className: "text-danger border-danger/40 bg-danger/10", dot: "bg-danger" };
     default:
       return { label: status, className: "text-muted border-line bg-panel2", dot: "bg-muted" };
   }
@@ -48,8 +50,11 @@ export function marketStatusTone(market: { status: string; phase?: string; chall
   className: string;
   dot: string;
 } {
-  if (market.status === "PROVISIONAL" && market.phase === "READY_TO_FINALIZE") {
+  if (market.status === "CHALLENGE_WINDOW" && market.phase === "READY_TO_FINALIZE") {
     return { label: "READY TO FINALIZE", className: "text-amber border-amber/40 bg-amber/10", dot: "bg-amber" };
+  }
+  if (market.status === "OPEN" && market.phase === "CLOSED_WAITING_RESOLUTION") {
+    return { label: "CLOSED, AWAITING RESOLUTION", className: "text-no border-no/40 bg-no/10", dot: "bg-no" };
   }
   return statusTone(market.status);
 }

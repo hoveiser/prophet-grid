@@ -79,7 +79,7 @@ export function ConsensusDrawer({ open, market, onClose, loadReceipt }: Consensu
                 <div className="grid grid-cols-3 gap-2 text-center">
                   <Mini label="anchor" value={String(receipt.confidence_anchor)} />
                   <Mini label="authenticated" value={receipt.source_authenticated ? "true" : "false"} />
-                  <Mini label="window" value={`${receipt.countdown_steps} steps`} />
+                  <Mini label="window" value={`${receipt.countdown_epochs} epochs`} />
                 </div>
 
                 <div className="mt-3">
@@ -133,8 +133,12 @@ export function ConsensusDrawer({ open, market, onClose, loadReceipt }: Consensu
                     </a>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span>resolved at step</span>
-                    <span className="font-mono text-ink">{receipt.resolved_at_step}</span>
+                    <span>resolved at epoch</span>
+                    <span className="font-mono text-ink">{receipt.resolved_at_epoch}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>window closes after epoch</span>
+                    <span className="font-mono text-ink">{receipt.challenge_deadline_epoch}</span>
                   </div>
                 </div>
                 {receipt.summary ? (
@@ -191,7 +195,7 @@ export function ConsensusDrawer({ open, market, onClose, loadReceipt }: Consensu
                         </div>
                         <div className="mt-1 flex items-center justify-between text-[9px]">
                           <span className="text-muted">{item.original_outcome} to {item.final_outcome || "pending"}</span>
-                          <span className="font-mono text-muted">step {item.reviewed_at_step || item.filed_at_step}</span>
+                          <span className="font-mono text-muted">epoch {item.reviewed_at_epoch || item.filed_at_epoch}</span>
                         </div>
                       </div>
                     ))}
@@ -203,7 +207,7 @@ export function ConsensusDrawer({ open, market, onClose, loadReceipt }: Consensu
                 <div>equivalence: {receipt.consensus}</div>
                 <div>runner: {receipt.runner_pin}</div>
                 <div>sources: {receipt.evidence_sources.join(" + ")}</div>
-                <div>window: {receipt.challenge_window_steps} steps | bond: {receipt.challenge_bond_amount}</div>
+                <div>window: {receipt.challenge_window_epochs} epochs | bond: {receipt.challenge_bond_amount}</div>
               </div>
             </>
           ) : null}

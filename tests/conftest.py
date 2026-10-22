@@ -3,11 +3,16 @@
 The unlink shim below is a Windows hardening measure required by the
 genlayer test harness: cached SDK directories are read only and Python
 raises PermissionError when it tries to clear them during cleanup.
+
+v2 time model: contracts derive current_epoch from the objective
+transaction datetime. Tests control it exclusively through the direct_vm
+warp cheatcode, exactly like a miner would move real block time forward.
 """
 
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -47,6 +52,23 @@ if sys.platform.startswith("win"):
 
 WINDOW = 2
 BOND = 50
+GRACE = 3
+MARKET_DURATION = 4
+
+BASE_UTC = datetime(2026, 1, 1, tzinfo=timezone.utc)
+EPOCH_BASE = int(BASE_UTC.timestamp()) // 60
+
+
+def epoch_iso(epoch: int) -> str:
+    """ISO timestamp 30 seconds into the given epoch."""
+    seconds = (epoch - EPOCH_BASE) * 60 + 30
+    return (BASE_UTC + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def warp_epoch(vm, epoch: int) -> None:
+    """Move the transaction datetime into the requested epoch."""
+    vm.warp(epoch_iso(epoch))
+
 
 QUESTION = "Will the Ethereum blob base fee average below 0.01 gwei for the next 30 days?"
 CRITERIA = (
@@ -103,8 +125,9 @@ def apply_verdict(
 
 
 @pytest.fixture
-def grid(direct_deploy):
-    return direct_deploy("contracts/prophet_grid.py", WINDOW, BOND)
+def grid(direct_vm, direct_deploy):
+    warp_epoch(direct_vm, EPOCH_BASE)
+    return direct_deploy("contracts/prophet_grid.py", WINDOW, BOND, GRACE)
 
 
 @pytest.fixture
@@ -116,8 +139,8 @@ def funded(direct_vm, grid, direct_alice, direct_bob, direct_charlie):
     return grid
 
 
-def open_market(contract, question=QUESTION):
-    return contract.create_market(question, "CRYPTO", PRIMARY, CRITERIA)
+def open_market(contract, question=QUESTION, duration=MARKET_DURATION):
+    return contract.create_market(question, "CRYPTO", PRIMARY, CRITERIA, duration)
 
 
 def trade(vm, contract, account, market_id, side, amount):
@@ -126,35 +149,51 @@ def trade(vm, contract, account, market_id, side, amount):
 
 
 def resolve(vm, contract, account, market_id, payload, evidence=EVIDENCE):
+    """Propose resolution at the exact objective close epoch."""
+    state = json.loads(contract.get_market(market_id))
+    warp_epoch(vm, state["close_epoch"])
     apply_verdict(vm, payload)
     vm.sender = account
-    return contract.resolve_market_live(market_id, evidence)
+    return contract.propose_resolution(market_id, evidence)
 
 
-def challenge(vm, contract, account, market_id, counter=COUNTER):
-    vm.sender = account
-    return contract.file_resolution_challenge(market_id, counter)
-
-
-def audit(vm, contract, account, market_id, payload):
+def challenge(vm, contract, account, market_id, payload, counter=COUNTER):
+    """Bond backed challenge with its own live re-evaluation verdict."""
     apply_verdict(vm, payload)
     vm.sender = account
-    return contract.audit_resolution_challenge(market_id)
+    return contract.challenge_resolution(market_id, counter)
 
 
-def advance(vm, contract, account, steps):
+def attempt_finalize(vm, contract, account, market_id):
+    """Call finalize_market without touching the clock."""
     vm.sender = account
-    return contract.advance_market_clock(steps)
+    return contract.finalize_market(market_id)
 
 
 def finalize(vm, contract, account, market_id):
+    """Wait the challenge window out with real time, then finalize."""
+    state = json.loads(contract.get_market(market_id))
+    warp_epoch(vm, state["challenge_deadline_epoch"] + 1)
     vm.sender = account
-    return contract.finalize_market_settlement(market_id)
+    return contract.finalize_market(market_id)
 
 
 def claim(vm, contract, account, market_id):
     vm.sender = account
     return contract.claim_market_payout(market_id)
+
+
+def claim_refund(vm, contract, account, market_id):
+    vm.sender = account
+    return contract.claim_refund(market_id)
+
+
+def expire(vm, contract, account, market_id):
+    """Wait for the resolution timeout, then expire the market."""
+    state = json.loads(contract.get_market(market_id))
+    warp_epoch(vm, state["resolution_timeout_epoch"])
+    vm.sender = account
+    return contract.expire_unresolved_market(market_id)
 
 
 def market_state(contract, market_id):
@@ -174,7 +213,6 @@ def balance(contract, account):
 
 
 def settle_market(vm, contract, market_id, payload, operator, evidence=EVIDENCE):
-    """Resolve, wait out the challenge window and finalize."""
+    """Propose, wait the challenge window out with real time and finalize."""
     resolve(vm, contract, operator, market_id, payload, evidence)
-    advance(vm, contract, operator, WINDOW)
     finalize(vm, contract, operator, market_id)

@@ -61,9 +61,11 @@ def main() -> int:
     lines.append(f"| Deployer | `{data.get('deployer')}` |")
     lines.append(f"| Deploy transaction | `{deploy_tx(data)}` |")
     lines.append(f"| Contract commit | `{tracked_commit()}` |")
-    lines.append("| Tag | `studionet-v1` |")
+    lines.append("| Tag | `studionet-v2-remediated` |")
     lines.append(f"| Runner pin | `{data.get('runner_pin')}` |")
-    lines.append(f"| Challenge window | {data.get('challenge_window_steps')} clock steps |")
+    lines.append(f"| Epoch length | {data.get('epoch_seconds', 60)} seconds of objective block time |")
+    lines.append(f"| Challenge window | {data.get('challenge_window_epochs')} epochs |")
+    lines.append(f"| Resolution grace | {data.get('resolution_grace_epochs')} epochs after close |")
     lines.append(f"| Challenge bond | {data.get('challenge_bond_amount')} PGT |")
     lines.append(f"| Transactions recorded | {len(data.get('transactions', []))} |")
     lines.append("")
@@ -108,6 +110,19 @@ def main() -> int:
             f"{proof.get('votes_agree')}/{proof.get('votes_total')} |"
         )
     lines.append("")
+
+    refunds = data.get("refund_lifecycle", [])
+    if refunds:
+        lines.append("### Refund lifecycle (zero winner and timeout paths)")
+        lines.append("")
+        lines.append("| Step | Transaction | Function | Status | Result | Execution |")
+        lines.append("|---|---|---|---|---|---|")
+        for row in refunds:
+            lines.append(
+                f"| {row.get('step')} | `{str(row.get('tx_hash'))[:18]}...` | {row.get('function')} | "
+                f"{row.get('status')} | {row.get('result')} | {row.get('execution')} |"
+            )
+        lines.append("")
 
     lines.append("### Custody invariant after settlement")
     lines.append("")
