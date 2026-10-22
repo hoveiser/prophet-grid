@@ -334,7 +334,7 @@ cd .. && .venv/bin/python tools/build_video.py
 | Contract | `0x5d7776fc51b76DF271f232A56e2E76F3e2d0fcE8` |
 | Deployer | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` |
 | Deploy transaction | `0xaa8f3ad6ba7a793feeaa36fbb384295eb24331cf5921b3f7a2c2f1577c126363` |
-| Contract commit | `1af7288fb56ef8e5106dbab92fd2cfec5009ff50` |
+| Contract commit | `6bfae84f19355d30ef3a451fae8f360fc7f69974` |
 | Tag | `studionet-v2-remediated` |
 | Runner pin | `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` |
 | Epoch length | 60 seconds of objective block time |
@@ -414,11 +414,11 @@ total_paid_out             = 1430
 | Source | sha256 | Bytes |
 |---|---|---|
 | Local LF file | `135a6d9726bc8357cd7a2c15a98aa8320a5bca8b57ba60576b7bf46c31c03ae0` | 84418 |
-| Git blob | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
+| Git blob | `135a6d9726bc8357cd7a2c15a98aa8320a5bca8b57ba60576b7bf46c31c03ae0` | 84418 |
 | On chain code | `135a6d9726bc8357cd7a2c15a98aa8320a5bca8b57ba60576b7bf46c31c03ae0` | 84418 |
-| GitHub raw file | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | None |
+| GitHub raw file | `135a6d9726bc8357cd7a2c15a98aa8320a5bca8b57ba60576b7bf46c31c03ae0` | 84418 |
 
-Local equals git: no. Local equals on chain: yes. All four equal: no.
+Local equals git: yes. Local equals on chain: yes. All four equal: yes.
 
 ### Local verification recorded with the evidence
 
