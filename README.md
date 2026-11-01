@@ -10,7 +10,7 @@ a bonded challenge window.
 | Contract (studionet) | `0x31C53838fF49168128D772625e34d3D2F7e11116` |
 | GenLayer explorer | https://genlayer-explorer.vercel.app/contracts/0x31C53838fF49168128D772625e34d3D2F7e11116 |
 | Source | https://github.com/hoveiser/prophet-grid |
-| Release tag | `milestone-v1` (previous release: `studionet-v1`) |
+| Release tag | `milestone-v1` at the head of `main` (earlier releases: `studionet-v1`, and the steward remediation line `studionet-v2-archive`) |
 | Demo reel (48 to 52 s, burned in subtitles, with audio) | https://hoveiser.github.io/prophet-grid/demo-video-subtitled.mp4 |
 | Demo reel in the repository | https://github.com/hoveiser/prophet-grid/blob/main/docs/demo-video-subtitled.mp4 |
 | Evidence | `evidence/studionet_Live_Milestone_v1.json`, `evidence/sha256_identity.json` |
@@ -21,7 +21,11 @@ Tags: `Prediction Markets`, `Conditional Markets`, `Outcome Resolution`.
 
 The accepted first release (`studionet-v1`, contract
 `0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967`, still live and unchanged) proved the
-core escrow and consensus resolution loop. Flagship v1 hardens and extends it:
+core escrow and consensus resolution loop. Flagship v1 hardens and extends it, and
+is now the canonical `main` lineage: it was merged through pull request #1, the tag
+`milestone-v1` points at the head of `main`, and the GitHub Pages site is built from
+that same commit. The steward remediation line that previously lived on `main` was
+not dropped, its tip is preserved at the tag `studionet-v2-archive`.
 
 | Area | studionet-v1 | milestone-v1 |
 |---|---|---|
@@ -399,6 +403,14 @@ All four identical: **yes**
   `0x38646A05EF30FBCD5aa96bBf55135629a3A1e67c`. The adversarial review then found a
   defect that could strand a challenger bond, so the contract was fixed, redeployed
   and re-run. That address is a superseded intermediate, not the release.
+- **Branch lineage.** Flagship v1 and the `studionet-v2-remediated` line were two
+  independent rewrites of the same contract, both closing the steward rejection.
+  `main` now carries Flagship v1. The merge keeps both histories: the v2 tip is
+  tagged `studionet-v2-archive`, and its contract at
+  `0x5d7776fc51b76DF271f232A56e2E76F3e2d0fcE8` stays deployed and untouched. The
+  v2 evidence files and v2 frontend components are not part of `main` anymore; they
+  remain readable through the archive tag. Both lines were never combined into one
+  contract, so no claim in this README depends on the v2 implementation.
 - **Consensus comparison.** `gl.eq_principle.prompt_comparative` asks a model to
   judge whether two outputs agree, which cannot guarantee exact integer equality on
   fields that move money. The contract uses `gl.vm.run_nondet_unsafe` with a
