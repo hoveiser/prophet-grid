@@ -14,10 +14,15 @@
   "deploy_tx": "0x2422f18750d4f85ea5f6395975cd090306d9235f5a0679b64a1b8e23cb593e45",
   "git_commit": "fb1fb5640ccf6f3086931b57da0bae3d95845a62",
   "sha256_identity": {
+    "generated_at": "2026-11-01T14:24:12+00:00",
+    "contract_address": "0x31C53838fF49168128D772625e34d3D2F7e11116",
+    "network": "studionet",
+    "chain_id": 61999,
     "local_lf_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
     "local_lf_bytes": 74390,
     "git_blob_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
     "git_blob_bytes": 74390,
+    "git_blob_object": "0fb5bec1c8f2a6a5545836e5880899184a90583e",
     "onchain_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
     "onchain_bytes": 74390,
     "remote_github_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
@@ -25,8 +30,7 @@
     "match_local_git": true,
     "match_local_onchain": true,
     "match_local_remote": true,
-    "match_all_four": true,
-    "generated_at": "2026-11-01T12:37:22+00:00"
+    "match_all_four": true
   },
   "platform_stats": {
     "token_symbol": "PGT",
