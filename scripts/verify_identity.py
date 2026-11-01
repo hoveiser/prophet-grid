@@ -87,7 +87,7 @@ def fetch_remote() -> bytes | None:
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    url = f"https://api.github.com/repos/{REPO}/contents/{CONTRACT_REL}?ref=main"
+    url = f"https://api.github.com/repos/{REPO}/contents/{CONTRACT_REL}?ref={git_ref()}"
     try:
         response = requests.get(url, headers=headers, timeout=45)
         if response.status_code == 200:

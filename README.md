@@ -300,7 +300,7 @@ RELEASE_TAG=milestone-v1 .venv/bin/python scripts/publish_github.py
 | RPC | `https://studio.genlayer.com/api` |
 | Deploy tx | `0x2422f18750d4f85ea5f6395975cd090306d9235f5a0679b64a1b8e23cb593e45` |
 | Release tag | `milestone-v1` |
-| Source commit | `688e97e5998d` |
+| Source commit | `35ce53aab5e0` |
 | Constructor | close 300s, challenge 120s, bond 10000000000000000 wei |
 | Contract sha256 | `76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b` |
 | Contract size | 74390 bytes |
@@ -374,11 +374,11 @@ RELEASE_TAG=milestone-v1 .venv/bin/python scripts/publish_github.py
 | Source | sha256 | Bytes | Match |
 |---|---|---|---|
 | local file with LF endings | `76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b` | 74390 | baseline |
-| git blob at HEAD | `22dae228239ce1e2108e8e67fb7147baa38578eb43989c44c14c8b4f63b86bbb` | 73984 | no |
+| git blob at HEAD | `76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b` | 74390 | yes |
 | deployed studionet code | `76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b` | 74390 | yes |
-| GitHub raw main branch | `135a6d9726bc8357cd7a2c15a98aa8320a5bca8b57ba60576b7bf46c31c03ae0` | 84418 | no |
+| GitHub raw main branch | `76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b` | 74390 | yes |
 
-All four identical: **no**
+All four identical: **yes**
 
 ### Local verification recorded with the evidence
 
