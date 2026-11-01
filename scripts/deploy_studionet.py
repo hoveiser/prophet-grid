@@ -767,7 +767,9 @@ class Runner:
         remote_size = 0
         try:
             response = requests.get(
-                "https://raw.githubusercontent.com/hoveiser/prophet-grid/main/contracts/prophet_grid.py",
+                "https://raw.githubusercontent.com/hoveiser/prophet-grid/"
+            f"{subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=str(ROOT), capture_output=True, text=True).stdout.strip() or 'main'}"
+            "/contracts/prophet_grid.py",
                 timeout=60,
             )
             if response.status_code == 200:

@@ -1,7 +1,7 @@
 {
   "project": "ProphetGrid Flagship v1",
   "milestone": "milestone-v1",
-  "generated_at": "2026-11-01T10:58:37+00:00",
+  "generated_at": "2026-11-01T12:37:21+00:00",
   "contract_address": "0x31C53838fF49168128D772625e34d3D2F7e11116",
   "network": "studionet",
   "chain_id": 61999,
@@ -12,17 +12,12 @@
     10000000000000000
   ],
   "deploy_tx": "0x2422f18750d4f85ea5f6395975cd090306d9235f5a0679b64a1b8e23cb593e45",
-  "git_commit": "f30cc13aba06da6899431b62149992ef57082c5e",
+  "git_commit": "fb1fb5640ccf6f3086931b57da0bae3d95845a62",
   "sha256_identity": {
-    "generated_at": "2026-11-01T12:36:09+00:00",
-    "contract_address": "0x31C53838fF49168128D772625e34d3D2F7e11116",
-    "network": "studionet",
-    "chain_id": 61999,
     "local_lf_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
     "local_lf_bytes": 74390,
     "git_blob_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
     "git_blob_bytes": 74390,
-    "git_blob_object": "0fb5bec1c8f2a6a5545836e5880899184a90583e",
     "onchain_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
     "onchain_bytes": 74390,
     "remote_github_sha256": "76138df9a7c8399877ea22d6401f9e4bc210bf6aed0ab740e134d7a93635190b",
@@ -30,7 +25,8 @@
     "match_local_git": true,
     "match_local_onchain": true,
     "match_local_remote": true,
-    "match_all_four": true
+    "match_all_four": true,
+    "generated_at": "2026-11-01T12:37:22+00:00"
   },
   "platform_stats": {
     "token_symbol": "PGT",
@@ -49,7 +45,7 @@
     "total_supply": 690001000000000000,
     "native_custody_wei": 690001000000000000,
     "protocol_reserve": 45250000000000000,
-    "epoch": 1793530718,
+    "epoch": 1793536642,
     "invariant_ok": true,
     "privileged_roles": 0,
     "grid_step_bps": 250,
@@ -181,7 +177,7 @@
       "resolution_epoch": 0,
       "challenge_deadline_epoch": 0,
       "resolution_timeout_epoch": 1793528115,
-      "now": 1793530734,
+      "now": 1793536659,
       "corroborated": false,
       "zero_winners": false,
       "refundable": false,
@@ -235,7 +231,7 @@
       "resolution_epoch": 1793527476,
       "challenge_deadline_epoch": 1793527596,
       "resolution_timeout_epoch": 1793528370,
-      "now": 1793530737,
+      "now": 1793536663,
       "corroborated": true,
       "zero_winners": true,
       "refundable": false,
@@ -289,7 +285,7 @@
       "resolution_epoch": 1793527527,
       "challenge_deadline_epoch": 1793527647,
       "resolution_timeout_epoch": 1793528540,
-      "now": 1793530740,
+      "now": 1793536666,
       "corroborated": true,
       "zero_winners": true,
       "refundable": false,
@@ -343,7 +339,7 @@
       "resolution_epoch": 1793527651,
       "challenge_deadline_epoch": 1793527771,
       "resolution_timeout_epoch": 1793528666,
-      "now": 1793530743,
+      "now": 1793536669,
       "corroborated": false,
       "zero_winners": true,
       "refundable": false,
@@ -397,7 +393,7 @@
       "resolution_epoch": 1793530399,
       "challenge_deadline_epoch": 1793530519,
       "resolution_timeout_epoch": 1793531445,
-      "now": 1793530746,
+      "now": 1793536672,
       "corroborated": true,
       "zero_winners": true,
       "refundable": false,
@@ -1609,6 +1605,6 @@
       "  Methods: 39 (20 view, 19 write)"
     ],
     "tests_returncode": 0,
-    "tests_summary": "99 passed in 2.76s"
+    "tests_summary": "99 passed in 2.88s"
   }
 }

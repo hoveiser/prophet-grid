@@ -383,7 +383,7 @@ All four identical: **yes**
 ### Local verification recorded with the evidence
 
 - `genvm-lint check contracts/prophet_grid.py` exit code 0: ✓ Lint passed (3 checks) ✓ Validation passed   Contract: ProphetGrid   Methods: 39 (20 view, 19 write)
-- `pytest tests/test_prophet_grid_direct.py -q` exit code 0: 99 passed in 2.76s
+- `pytest tests/test_prophet_grid_direct.py -q` exit code 0: 99 passed in 2.88s
 - transactions recorded: 57, rejected consensus attempts: 0
 - evidence file: `evidence/studionet_Live_Milestone_v1.json`
 
