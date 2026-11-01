@@ -199,20 +199,25 @@ def check_video_policy() -> None:
 
 
 def check_video_urls() -> None:
-    """Both published copies of the video must answer with HTTP 200."""
-    urls = [
-        "https://github.com/hoveiser/prophet-grid/raw/main/docs/demo-video-subtitled.mp4",
-        f"{PAGES_URL}demo-video-subtitled.mp4",
-    ]
-    statuses = []
-    for url in urls:
+    """The branch copy must be byte identical to the local reel.
+
+    The Pages copy is reported separately because the published site still
+    serves the main branch build until the branch is merged.
+    """
+    local = sha256((ROOT / "docs" / "demo-video-subtitled.mp4").read_bytes())
+    branch = "https://raw.githubusercontent.com/hoveiser/prophet-grid/milestone-v1/docs/demo-video-subtitled.mp4"
+    pages = f"{PAGES_URL}demo-video-subtitled.mp4"
+    results = {}
+    for label, url in (("branch", branch), ("pages", pages)):
         try:
-            response = requests.get(url, timeout=45, allow_redirects=True)
-            statuses.append(response.status_code)
+            response = requests.get(url, timeout=60, allow_redirects=True)
+            results[label] = (response.status_code, sha256(response.content) if response.status_code == 200 else "")
         except requests.RequestException:
-            statuses.append(0)
-    ok = all(status == 200 for status in statuses)
-    record("Video URLs", "GET the repo raw file and the Pages copy", ok, f"statuses={statuses}")
+            results[label] = (0, "")
+    branch_ok = results["branch"][0] == 200 and results["branch"][1] == local
+    detail = (f"branch HTTP {results['branch'][0]} same_bytes={branch_ok}, "
+              f"pages HTTP {results['pages'][0]} (main line build)")
+    record("Video URLs", "GET the branch raw reel and the Pages copy", branch_ok and results["pages"][0] == 200, detail)
 
 
 def check_chain_views() -> None:
@@ -286,6 +291,8 @@ def check_template_names() -> None:
         for needle in TEMPLATE_NAMES:
             if needle in text:
                 hits.append(f"{path.relative_to(ROOT)}:{needle}")
+    # The detector names the banned strings, so it must not scan itself.
+    hits = [item for item in hits if not item.startswith("scripts/presubmission_checks.py:")]
     record("De templating", "grep public files for template component names", not hits, ", ".join(hits[:4]) or "none")
 
 
