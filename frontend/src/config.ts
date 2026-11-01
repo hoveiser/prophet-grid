@@ -1,6 +1,6 @@
 export const CONTRACT_ADDRESS: `0x${string}` =
   (import.meta.env.VITE_CONTRACT_ADDRESS as `0x${string}` | undefined) ??
-  "0x38646A05EF30FBCD5aa96bBf55135629a3A1e67c";
+  "0x31C53838fF49168128D772625e34d3D2F7e11116";
 
 export const EXPLORER_URL = `https://genlayer-explorer.vercel.app/contracts/${CONTRACT_ADDRESS}`;
 export const REPO_URL = "https://github.com/hoveiser/prophet-grid";

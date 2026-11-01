@@ -1039,3 +1039,31 @@ def test_stats_report_the_custody_position(direct_vm, funded, direct_alice, dire
     assert row["invariant_ok"] is True
     assert row["native_custody_wei"] == 3000 * UNIT
     assert row["fee_bps"] == 250
+
+
+def test_timeout_refund_returns_an_open_challenge_bond(direct_vm, funded, direct_alice, direct_bob, direct_charlie):
+    """Regression: an unresolved challenge must not strand the challenger bond."""
+    mid = open_two_sided_market(direct_vm, funded, direct_alice, direct_bob, direct_charlie)
+    challenge(direct_vm, funded, direct_bob, mid)
+    assert invariant(funded)["pending_challenge_bonds"] == BOND
+    timeout = state(funded, mid)["resolution_timeout_epoch"]
+    set_time(direct_vm, timeout + 1)
+    refund(direct_vm, funded, direct_charlie, mid)
+    assert invariant(funded)["pending_challenge_bonds"] == 0
+    assert balance(funded, direct_bob) == 900 * UNIT
+    refund(direct_vm, funded, direct_alice, mid)
+    refund(direct_vm, funded, direct_bob, mid)
+    report = invariant(funded)
+    assert report["locked_market_pots"] == 0
+    assert report["ok"] is True
+    assert state(funded, mid)["status"] == "REFUNDED"
+
+
+def test_consumer_names_are_unique(direct_vm, funded, direct_alice, direct_bob):
+    direct_vm.sender = direct_alice
+    funded.register_ecosystem_consumer("prophetsentinel")
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("already taken"):
+        funded.register_ecosystem_consumer("prophetsentinel")
+    out = json.loads(funded.register_ecosystem_consumer("prophetsyndicate"))
+    assert out["consumer"] == "PROPHETSYNDICATE"

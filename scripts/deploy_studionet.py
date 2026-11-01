@@ -819,6 +819,7 @@ class Runner:
                 "contract_reported_wei": str(self.read_json("get_platform_stats")["native_custody_wei"]),
                 "total_supply_units": str(self.read_json("get_platform_stats")["total_supply"]),
             },
+            "market_notes": {market["key"]: market.get("note", "") for market in MARKETS},
             "markets": [],
             "resolution_receipts": [],
             "hedges": [],
@@ -831,13 +832,20 @@ class Runner:
             "rejected_attempts": self.checkpoint["attempts"],
             "local_checks": run_local_checks(),
         }
+        for key, market_id in markets.items():
+            row = self.read_json("get_market", [market_id])
+            row["book"] = key
+            payload["markets"].append(row)
+            receipt = self.read_json("get_resolution_receipt", [market_id])
+            receipt["book"] = key
+            payload["resolution_receipts"].append(receipt)
         for market in MARKETS:
-            key = market["key"]
-            market_id = markets.get(key)
-            if market_id is None:
-                continue
-            payload["markets"].append(self.read_json("get_market", [market_id]))
-            payload["resolution_receipts"].append(self.read_json("get_resolution_receipt", [market_id]))
+            if market["key"] in markets:
+                payload["market_notes"].setdefault(market["key"], market.get("note", ""))
+        payload["market_notes"]["challenge_book"] = (
+            "Book created by scripts/drive_challenge_lifecycle.py: resolved, bonded challenge "
+            "filed, second challenge attempt soft failed, re-audited by consensus, finalized and claimed."
+        )
         for hedge_id in ("1", "2"):
             try:
                 payload["hedges"].append(self.read_json("get_hedge", [hedge_id]))
@@ -846,14 +854,22 @@ class Runner:
         for name, account in self.burners.items():
             payload["consumers"].append({"desk": name, "address": account.address,
                                          "portfolio": self.read_json("get_trader_portfolio", [account.address])})
+        steps = self.checkpoint["steps"]
         for entry in self.checkpoint["transactions"]:
             step = entry.get("step", "")
+            record = steps.get(step, {})
             if step.startswith(("resolve:", "audit:")) and entry.get("tx_hash"):
                 payload["consensus_proofs"].append(entry)
-            if step.startswith("guard:") and entry.get("expected_revert"):
-                payload["guard_reverts"].append(entry)
-            if step.startswith("soft_fail:") or step.startswith("refund:"):
-                payload["soft_fail_proof"].append(entry)
+            if step.startswith("guard:") and record.get("expected_revert"):
+                payload["guard_reverts"].append({**entry, "error": record.get("error"),
+                                                 "matched_expected_revert": record.get("matched_expected_revert")})
+            if (step.startswith("soft_fail:") or step.startswith("refund:")
+                    or step.startswith("challenge_payable:")):
+                merged = dict(entry)
+                for extra in ("refundable_after_soft_fail", "error"):
+                    if record.get(extra) is not None:
+                        merged[extra] = record[extra]
+                payload["soft_fail_proof"].append(merged)
         save_json(EVIDENCE_FILE, payload)
         log(f"evidence written to {EVIDENCE_FILE}")
         identity = payload["sha256_identity"]

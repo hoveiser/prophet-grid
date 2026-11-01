@@ -31,7 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
-ARTIFACTS = ROOT / "artifacts"
+ARTIFACTS = ROOT / ".build"
 AUDIO = ARTIFACTS / "terminal-bed.wav"
 SUBTITLES = ARTIFACTS / "terminal-reel.srt"
 RAW_VIDEO = ARTIFACTS / "terminal-session.webm"
@@ -173,15 +173,15 @@ def synthesise(path: Path) -> None:
 def write_subtitles(path: Path) -> None:
     cues = [
         (0.3, 4.6, "ProphetGrid flagship v1: conditional macro books,\nadjudicated by validator consensus."),
-        (4.9, 9.4, "Every strike sits on a 250 basis point grid.\nThe print is read from two independent sources."),
-        (9.7, 14.2, "The orderbook shows depth on both legs,\nthe derived budget split and the gate clock."),
-        (14.5, 19.6, "The payoff modeler replays the same rule\nthe chain runs: quantized print, band, payout."),
-        (19.9, 25.4, "A hedge basket pairs opposite legs across two books\nand reserves the maximum liability up front."),
-        (25.7, 31.0, "Dual source telemetry shows the fields validators\nmust agree on, and the challenge record."),
-        (31.3, 36.6, "Custody accounting: supply equals native value held,\nand the vault equals every locked term."),
-        (36.9, 42.0, "Refused deposits are parked as refund claims,\nnever reverted and never stranded."),
-        (42.3, 46.6, "Timeouts and zero winner books refund\nthe desk principal in full."),
-        (46.9, 50.0, "No admin key, no manual clock.\nProphetGrid on GenLayer studionet."),
+        (4.9, 9.6, "Every strike sits on a 250 basis point grid.\nThe print is read from two independent sources."),
+        (9.9, 14.6, "The orderbook shows depth on both legs,\nthe derived budget split and the gate clock."),
+        (14.9, 19.6, "The payoff modeler replays the same rule\nthe chain runs: quantized print, band, payout."),
+        (19.9, 25.0, "A hedge basket pairs opposite legs across two books\nand reserves the maximum liability up front."),
+        (25.3, 31.0, "Dual source telemetry shows the fields validators\nmust agree on, and the challenge record."),
+        (31.3, 37.0, "Three burner desks, an injected wallet, or watch only:\nthe desk session signs every action."),
+        (37.3, 42.5, "Refused deposits are parked as refund claims,\nnever reverted and never stranded."),
+        (42.8, 46.5, "The custody rail checks supply against the native value\nthe address actually holds on the node."),
+        (46.8, 50.0, "No admin key, no manual clock.\nProphetGrid on GenLayer studionet."),
     ]
     blocks = []
     for number, (start, end, text) in enumerate(cues, start=1):
@@ -258,13 +258,30 @@ def capture(base_url: str) -> None:
     )
 
 
+def probe_seconds(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
 def mux(skip_capture: bool) -> None:
     import time
 
+    if skip_capture and not RAW_VIDEO.exists():
+        raise SystemExit(f"no capture at {RAW_VIDEO}, run without --skip-capture")
+    raw_seconds = probe_seconds(RAW_VIDEO)
+    factor = (SECONDS / raw_seconds) if raw_seconds > 1 else 1.0
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(RAW_VIDEO), "-i", str(AUDIO),
         "-vf", (
+            f"setpts=PTS*{factor:.6f},"
             "scale=1280:720:force_original_aspect_ratio=decrease,"
             "pad=1280:720:(ow-iw)/2:(oh-ih)/2,"
             f"subtitles={SUBTITLES}:charenc=utf-8:fontsdir=/usr/share/fonts,"
@@ -276,8 +293,6 @@ def mux(skip_capture: bool) -> None:
         "-t", f"{SECONDS:.1f}", "-shortest", "-movflags", "+faststart",
         str(DOCS_VIDEO),
     ]
-    if skip_capture and not RAW_VIDEO.exists():
-        raise SystemExit(f"no capture at {RAW_VIDEO}, run without --skip-capture")
     run(command, cwd=ROOT)
     shutil.copy2(DOCS_VIDEO, SITE_VIDEO)
 
@@ -312,6 +327,10 @@ def main() -> int:
     parser.add_argument("--skip-capture", action="store_true", help="reuse the existing raw capture")
     parser.add_argument("--audio-only", action="store_true")
     args = parser.parse_args()
+
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
 
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     synthesise(AUDIO)

@@ -16,7 +16,7 @@ import { chromium } from "playwright";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../..");
 const baseUrl = process.argv[2] ?? "http://127.0.0.1:4176/prophet-grid/";
-const outPath = process.argv[3] ?? join(root, "artifacts", "terminal-session.webm");
+const outPath = process.argv[3] ?? join(root, ".build", "terminal-session.webm");
 const deskKey = process.env.CAPTURE_DESK_KEY ?? "";
 const deskAddress = process.env.CAPTURE_DESK_ADDRESS ?? "";
 
@@ -26,7 +26,7 @@ const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({
   viewport: { width: 1280, height: 720 },
   deviceScaleFactor: 1,
-  recordVideo: { dir: join(root, "artifacts", "video-raw"), size: { width: 1280, height: 720 } },
+  recordVideo: { dir: join(root, ".build", "video-raw"), size: { width: 1280, height: 720 } },
 });
 
 if (deskKey) {
@@ -137,7 +137,7 @@ const { renameSync, existsSync } = await import("node:fs");
 if (source && existsSync(source)) {
   renameSync(source, outPath);
 } else {
-  const dir = join(root, "artifacts", "video-raw");
+  const dir = join(root, ".build", "video-raw");
   const { readdirSync, statSync } = await import("node:fs");
   const candidates = readdirSync(dir)
     .filter((name) => name.endsWith(".webm"))

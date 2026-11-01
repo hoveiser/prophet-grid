@@ -79,13 +79,21 @@ export default function App() {
   const [listingOpen, setListingOpen] = useState(false);
   const [telemetryOpen, setTelemetryOpen] = useState(false);
   const [policy, setPolicy] = useState<ConsensusPolicy | null>(null);
+  const [showEmpty, setShowEmpty] = useState(false);
   const [booting, setBooting] = useState(true);
   const [errors, setErrors] = useState<string | null>(null);
   const sequence = useRef(1);
 
+  /** Anyone may list a book, so empty listings exist. They are hidden by default. */
+  const books = useMemo(
+    () => (showEmpty ? markets : markets.filter((row) => row.pot > 0 || row.status !== "OPEN")),
+    [markets, showEmpty],
+  );
+  const hiddenBooks = markets.length - books.length;
+
   const active = useMemo(
-    () => markets.find((row) => row.market_id === selected) ?? markets[0] ?? null,
-    [markets, selected],
+    () => books.find((row) => row.market_id === selected) ?? books[0] ?? null,
+    [books, selected],
   );
 
   const notify = useCallback((tone: Signal["tone"], title: string, detail?: string) => {
@@ -108,7 +116,7 @@ export default function App() {
 
   /** Initial paint costs exactly four RPC calls to stay inside the rate limit. */
   const refresh = useCallback(
-    async (client: TerminalClient, address: string, deep = false) => {
+    async (client: TerminalClient, address: string) => {
       const [nextStats, page, nextCustody] = await Promise.all([
         readContract<PlatformStats>(client, "get_platform_stats"),
         readContract<MarketPage>(client, "list_markets", [0, 8]),
@@ -119,17 +127,24 @@ export default function App() {
       setCustody(nextCustody);
       if (!selected && page.rows.length > 0) setSelected(page.rows[0].market_id);
       await loadDeskViews(client, address);
-      if (deep && !policy) {
-        setPolicy(await readContract<ConsensusPolicy>(client, "get_consensus_policy"));
-      }
     },
-    [loadDeskViews, policy, selected],
+    [loadDeskViews, selected],
   );
+
+  /** The consensus policy is static per deployment, so it is fetched once on demand. */
+  const ensurePolicy = useCallback(async () => {
+    if (policy) return;
+    try {
+      setPolicy(await readContract<ConsensusPolicy>(desk.client, "get_consensus_policy"));
+    } catch {
+      setPolicy(null);
+    }
+  }, [desk, policy]);
 
   useEffect(() => {
     let cancelled = false;
     setBooting(true);
-    refresh(desk.client, desk.address, true)
+    refresh(desk.client, desk.address)
       .catch((error: unknown) => {
         if (!cancelled) setErrors(describeFailure(error));
       })
@@ -289,7 +304,7 @@ export default function App() {
     <div className="min-h-screen">
       <TerminalChrome
         stats={stats}
-        markets={markets}
+        markets={books}
         desk={desk.address}
         mode={mode}
         silenced={silenced}
@@ -320,8 +335,18 @@ export default function App() {
             >
               <ArrowDownLeft size={11} /> list a conditional book
             </button>
+            <button
+              data-testid="toggle-empty-books"
+              onClick={() => setShowEmpty((current) => !current)}
+              className="border border-edge px-2 py-[2px] font-mono text-[9px] text-dim transition hover:border-cyan/45 hover:text-ink"
+              title="Anyone may list a book, so unfunded listings exist on chain"
+            >
+              {showEmpty
+                ? `showing all ${books.length} listings`
+                : `${books.length} funded books · ${hiddenBooks} unfunded hidden`}
+            </button>
             <span className="font-mono text-[9px] text-dim">
-              {basketCount} baskets locked · refund floor {pgt(MIN_DEPOSIT_WEI)}
+              {basketCount} baskets locked · deposit floor {pgt(MIN_DEPOSIT_WEI)}
             </span>
           </div>
         </div>
@@ -337,7 +362,7 @@ export default function App() {
         {workspace === "books" ? (
           <div className="grid gap-3 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
             <OrderbookMatrix
-              markets={markets}
+              markets={books}
               selected={active?.market_id ?? null}
               positions={positions}
               hedges={hedges}
@@ -365,6 +390,7 @@ export default function App() {
                 onSweepRefund={onSweepRefund}
                 onOpenTelemetry={() => {
                   setTelemetryOpen(true);
+                  void ensurePolicy();
                   audio.play("print");
                 }}
               />
@@ -377,7 +403,7 @@ export default function App() {
           <div className="grid gap-3 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
             <PayoffCurveModeler market={active} />
             <BasketComposer
-              markets={markets}
+              markets={books}
               book={book}
               busy={busy}
               writable={desk.writable && mode !== "watch only"}
@@ -404,14 +430,17 @@ export default function App() {
             <div className="space-y-3">
               <SolvencyBoard stats={stats} custody={custody} />
               <OrderbookMatrix
-                markets={markets}
+                markets={books}
                 selected={active?.market_id ?? null}
                 positions={positions}
                 hedges={hedges}
                 busy={busy}
                 onSelect={(id) => setSelected(id)}
                 onReleaseHedge={onReleaseHedge}
-                onOpenWorkspace={() => setTelemetryOpen(true)}
+                onOpenWorkspace={() => {
+                  setTelemetryOpen(true);
+                  void ensurePolicy();
+                }}
               />
             </div>
             <div className="rail px-3 py-3">
@@ -449,7 +478,10 @@ export default function App() {
               </div>
               <button
                 data-testid="telemetry-open"
-                onClick={() => setTelemetryOpen(true)}
+                onClick={() => {
+                  setTelemetryOpen(true);
+                  void ensurePolicy();
+                }}
                 className="mt-3 w-full border border-amber/40 bg-amber/10 py-2 font-mono text-[10px] text-amber transition hover:bg-amber/20"
               >
                 open the full dual source telemetry for PG:{active?.market_id ?? "-"}

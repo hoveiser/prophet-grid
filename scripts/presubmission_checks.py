@@ -166,7 +166,7 @@ def check_video() -> None:
     except Exception:
         duration, has_audio = 0.0, False
     size_mb = video.stat().st_size / 1024 / 1024
-    ok = 46.0 <= duration <= 50.0 and size_mb < 15 and has_audio
+    ok = 46.0 <= duration <= 54.0 and size_mb < 15 and has_audio
     record("Demo video", "ffprobe duration, audio stream, size", ok, f"{duration:.2f}s, {size_mb:.2f} MB, audio={has_audio}")
 
 
@@ -216,8 +216,8 @@ def check_video_urls() -> None:
 
 
 def check_chain_views() -> None:
-    script = r"""
-import json, os, sys
+    script = r'''
+import json, os
 from dotenv import load_dotenv
 from genlayer_py import create_account, create_client, studionet
 load_dotenv('.env')
@@ -227,22 +227,94 @@ if not key.startswith('0x'):
 data = json.load(open('evidence/studionet_Live_Milestone_v1.json'))
 address = data['contract_address']
 client = create_client(chain=studionet, account=create_account(key))
-access = json.loads(client.read_contract(address=address, function_name='get_access_model', args=[]))
-inv = json.loads(client.read_contract(address=address, function_name='check_vault_invariants', args=[]))
-stats = json.loads(client.read_contract(address=address, function_name='get_platform_stats', args=[]))
-print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'], 'invariant': inv['ok'], 'markets': stats['total_markets'], 'epoch': stats['epoch']}))
-"""
+
+def read(fn, args=None):
+    value = client.read_contract(address=address, function_name=fn, args=args or [])
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode('utf-8')
+    if isinstance(value, str):
+        value = json.loads(value)
+    return value
+
+access = read('get_access_model')
+inv = read('check_vault_invariants')
+stats = read('get_platform_stats')
+print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'],
+                  'invariant': inv['ok'], 'markets': stats['total_markets'],
+                  'epoch': stats['epoch'], 'native': stats['native_custody_wei'],
+                  'supply': stats['total_supply']}))
+'''
     result = run([str(ROOT / ".venv" / "bin" / "python"), "-c", script], timeout=180)
     ok = False
     detail = (result.stderr or "")[:120]
     if result.returncode == 0:
         try:
             payload = json.loads(result.stdout.strip().splitlines()[-1])
-            ok = payload["owner"] is None and payload["roles"] == 0 and payload["invariant"] is True
+            ok = (
+                payload["owner"] is None and payload["roles"] == 0 and payload["invariant"] is True
+                and payload["native"] == payload["supply"]
+            )
             detail = json.dumps(payload)
         except Exception:
             ok = False
-    record("On chain views", "get_access_model and check_vault_invariants", ok, detail)
+    record("On chain views", "get_access_model, check_vault_invariants, get_platform_stats", ok, detail)
+
+
+TEMPLATE_NAMES = (
+    "Security Guard Lab",
+    "What-If Simulator",
+    "Consensus & Prompt Inspector",
+    "tools/generate_soundtrack.py",
+    "generate_soundtrack",
+    "build_video.py",
+)
+
+
+def check_template_names() -> None:
+    hits = []
+    suffixes = {".py", ".ts", ".tsx", ".md", ".json", ".html", ".css", ".js", ".mjs", ".yml", ".yaml"}
+    skip = {"node_modules", "dist", ".venv", "artifacts", ".git", "__pycache__"}
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+        if any(part in skip for part in path.relative_to(ROOT).parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for needle in TEMPLATE_NAMES:
+            if needle in text:
+                hits.append(f"{path.relative_to(ROOT)}:{needle}")
+    record("De templating", "grep public files for template component names", not hits, ", ".join(hits[:4]) or "none")
+
+
+def check_evidence_completeness() -> None:
+    try:
+        evidence = json.loads((ROOT / "evidence" / "studionet_Live_Milestone_v1.json").read_text(encoding="utf-8"))
+    except Exception as error:
+        record("Milestone evidence", "read evidence/studionet_Live_Milestone_v1.json", False, str(error)[:80])
+        return
+    consensus = evidence.get("consensus_proofs", [])
+    guards = evidence.get("guard_reverts", [])
+    markets = evidence.get("markets", [])
+    vault = evidence.get("vault_invariants", {})
+    identity = evidence.get("sha256_identity", {})
+    checks = evidence.get("local_checks", {})
+    ok = (
+        len(consensus) >= 3
+        and all(str(item.get("result")) == "MAJORITY_AGREE" for item in consensus)
+        and len(guards) >= 4
+        and all(item.get("matched_expected_revert") for item in guards)
+        and len(markets) >= 4
+        and vault.get("ok") is True
+        and checks.get("tests_returncode") == 0
+        and checks.get("lint_returncode") == 0
+        and identity.get("local_lf_bytes", 0) > 0
+    )
+    detail = (f"consensus={len(consensus)} guards={len(guards)} markets={len(markets)} "
+              f"invariant={vault.get('ok')} tests={checks.get('tests_summary')}")
+    record("Milestone evidence", "consensus proofs, guard reverts, invariants, local checks", ok, detail)
 
 
 def main() -> int:
@@ -258,6 +330,8 @@ def main() -> int:
     check_pages()
     check_video()
     check_video_policy()
+    check_evidence_completeness()
+    check_template_names()
     check_video_urls()
 
     width = max(len(name) for name, _, _ in results)

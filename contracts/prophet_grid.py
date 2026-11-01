@@ -1085,6 +1085,18 @@ class ProphetGrid(gl.Contract):
             return True
         return False
 
+    def _abort_pending_challenges(self, key: str, now: int) -> None:
+        """Return every open bond when the book leaves the challenge path."""
+        for ck in list(self.challenge_keys):
+            record = self.challenges[ck]
+            if record.market_id == key and record.state == C_PENDING:
+                bond = _u(record.bond)
+                record.state = C_ABORT
+                record.decided_at = u256(now)
+                self.challenges[ck] = record
+                self.bond_total = u256(_u(self.bond_total) - bond)
+                self._credit(record.challenger, bond)
+
     @gl.public.write
     def finalize_market_settlement(self, market_id: str) -> str:
         """Close the challenge window and lock the distribution terms."""
@@ -1097,15 +1109,7 @@ class ProphetGrid(gl.Contract):
             _fail(EE + " market is not awaiting settlement")
         if now < _u(market.challenge_deadline_epoch):
             _fail(EE + " CHALLENGE_WINDOW_OPEN until " + str(market.challenge_deadline_epoch))
-        for ck in list(self.challenge_keys):
-            record = self.challenges[ck]
-            if record.market_id == key and record.state == C_PENDING:
-                bond = _u(record.bond)
-                record.state = C_ABORT
-                record.decided_at = u256(now)
-                self.challenges[ck] = record
-                self.bond_total = u256(_u(self.bond_total) - bond)
-                self._credit(record.challenger, bond)
+        self._abort_pending_challenges(key, now)
         pot = _u(market.yes_pool) + _u(market.no_pool)
         if self._zero_winners(market):
             market.mode = MODE_REFUND
@@ -1198,6 +1202,8 @@ class ProphetGrid(gl.Contract):
         refund_mode = market.status == S_FINAL and market.mode == MODE_REFUND
         if not (timed_out or refund_mode):
             _fail(EE + " this market is not refundable right now")
+        if market.status in (S_PROV, S_CHAL):
+            self._abort_pending_challenges(key, now)
         y = self._shares(market, YES, who)
         n = self._shares(market, NO, who)
         principal = y + n
@@ -1350,6 +1356,8 @@ class ProphetGrid(gl.Contract):
             _fail(EE + " consumer name is required")
         if self.consumers.get(who, None) is not None:
             _fail(EE + " this address is already registered")
+        if label in list(self.consumer_names):
+            _fail(EE + " that consumer name is already taken")
         self.consumers[who] = Consumer(
             address=who, name=label, registered_at=u256(self._now()), last_market_id="",
             read_count=u256(0),
