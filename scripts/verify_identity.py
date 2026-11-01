@@ -97,7 +97,7 @@ def fetch_remote() -> bytes | None:
         print(f"remote fetch failed: {type(exc).__name__}")
     try:
         response = requests.get(
-            f"https://raw.githubusercontent.com/{REPO}/main/{CONTRACT_REL}",
+            f"https://raw.githubusercontent.com/{REPO}/{git_ref()}/{CONTRACT_REL}",
             timeout=45,
         )
         if response.status_code == 200:
@@ -106,6 +106,20 @@ def fetch_remote() -> bytes | None:
     except Exception as exc:  # noqa: BLE001
         print(f"remote raw failed: {type(exc).__name__}")
     return None
+
+
+def git_ref() -> str:
+    """Branch whose raw file is the fourth leg, overridable with IDENTITY_REF."""
+    override = os.environ.get("IDENTITY_REF", "").strip()
+    if override:
+        return override
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(ROOT), capture_output=True, text=True, check=True,
+        ).stdout.strip() or "main"
+    except Exception:
+        return "main"
 
 
 def main() -> int:
