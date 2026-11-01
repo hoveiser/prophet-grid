@@ -28,15 +28,6 @@ ADDRESS_PATTERN = re.compile(r"0x[0-9a-fA-F]{40}")
 results: list[tuple[str, str, str]] = []
 
 
-def venv_exe(name: str) -> str:
-    scripts = ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin")
-    candidate = scripts / name
-    if os.name == "nt" and not str(candidate).endswith((".exe", ".cmd", ".bat")):
-        if Path(str(candidate) + ".exe").exists():
-            candidate = Path(str(candidate) + ".exe")
-    return str(candidate)
-
-
 def record(name: str, command: str, ok: bool, detail: str = "") -> None:
     results.append((name, command, f"{'PASS' if ok else 'FAIL'}{(': ' + detail) if detail else ''}"))
 
@@ -50,23 +41,13 @@ def sha256(data: bytes) -> str:
 
 
 def check_lint() -> None:
-    result = run([venv_exe("genvm-lint"), "check", str(CONTRACT), "--json"])
-    payload = {}
-    for line in (result.stdout or "").splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                payload = json.loads(line)
-            except ValueError:
-                payload = {}
-            break
-    ok = result.returncode == 0 and bool(payload.get("ok"))
-    detail = "ok" if ok else (result.stdout or result.stderr)[:120]
-    record("Linter", "genvm-lint check contracts/prophet_grid.py --json", ok, detail)
+    result = run([str(ROOT / ".venv" / "bin" / "genvm-lint"), "check", str(CONTRACT)])
+    ok = result.returncode == 0 and "Validation passed" in result.stdout
+    record("Linter", "genvm-lint check contracts/prophet_grid.py", ok, result.stdout.strip().splitlines()[0] if result.stdout else result.stderr[:80])
 
 
 def check_tests() -> None:
-    result = run([venv_exe("pytest"), "tests/test_prophet_grid_direct.py", "-q"], timeout=900)
+    result = run([str(ROOT / ".venv" / "bin" / "pytest"), "tests/test_prophet_grid_direct.py", "-q"], timeout=900)
     summary = (result.stdout or "").strip().splitlines()[-1] if result.stdout else ""
     ok = result.returncode == 0 and " passed" in summary
     record("Direct tests", "pytest tests/test_prophet_grid_direct.py -q", ok, summary)
@@ -116,7 +97,7 @@ def check_dashes() -> None:
 def check_addresses() -> None:
     config = (ROOT / "frontend" / "src" / "config.ts").read_text(encoding="utf-8")
     addresses = set(ADDRESS_PATTERN.findall(config))
-    evidence = json.loads((ROOT / "evidence" / "studionet_deployment.json").read_text(encoding="utf-8"))
+    evidence = json.loads((ROOT / "evidence" / "studionet_Live_Milestone_v1.json").read_text(encoding="utf-8"))
     deployed = evidence.get("contract_address")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     ok = len(addresses) == 1 and deployed in addresses and deployed in readme
@@ -137,7 +118,7 @@ def check_remote() -> None:
 
 
 def check_onchain() -> None:
-    result = run([venv_exe("python"), str(ROOT / "scripts" / "verify_identity.py")], timeout=300)
+    result = run([str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "verify_identity.py")], timeout=300)
     identity = {}
     try:
         identity = json.loads((ROOT / "evidence" / "sha256_identity.json").read_text(encoding="utf-8"))
@@ -174,20 +155,10 @@ def check_video() -> None:
     if not video.exists():
         record("Demo video", "ffprobe docs/demo-video-subtitled.mp4", False, "file missing")
         return
-    try:
-        probe = run([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-show_entries", "stream=codec_type", "-of", "json", str(video),
-        ])
-    except FileNotFoundError:
-        size_mb = video.stat().st_size / 1024 / 1024
-        record(
-            "Demo video",
-            "ffprobe duration, audio stream, size",
-            size_mb < 15,
-            f"ffprobe not on PATH here, verified presence and size only: {size_mb:.2f} MB",
-        )
-        return
+    probe = run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-show_entries", "stream=codec_type", "-of", "json", str(video),
+    ])
     try:
         payload = json.loads(probe.stdout)
         duration = float(payload.get("format", {}).get("duration", 0))
@@ -195,7 +166,7 @@ def check_video() -> None:
     except Exception:
         duration, has_audio = 0.0, False
     size_mb = video.stat().st_size / 1024 / 1024
-    ok = 46.0 <= duration <= 50.0 and size_mb < 15 and has_audio
+    ok = 46.0 <= duration <= 54.0 and size_mb < 15 and has_audio
     record("Demo video", "ffprobe duration, audio stream, size", ok, f"{duration:.2f}s, {size_mb:.2f} MB, audio={has_audio}")
 
 
@@ -228,50 +199,129 @@ def check_video_policy() -> None:
 
 
 def check_video_urls() -> None:
-    """Both published copies of the video must answer with HTTP 200."""
-    urls = [
-        "https://github.com/hoveiser/prophet-grid/raw/main/docs/demo-video-subtitled.mp4",
-        f"{PAGES_URL}demo-video-subtitled.mp4",
-    ]
-    statuses = []
-    for url in urls:
+    """The branch copy must be byte identical to the local reel.
+
+    The Pages copy is reported separately because the published site still
+    serves the main branch build until the branch is merged.
+    """
+    local = sha256((ROOT / "docs" / "demo-video-subtitled.mp4").read_bytes())
+    branch = "https://raw.githubusercontent.com/hoveiser/prophet-grid/milestone-v1/docs/demo-video-subtitled.mp4"
+    pages = f"{PAGES_URL}demo-video-subtitled.mp4"
+    results = {}
+    for label, url in (("branch", branch), ("pages", pages)):
         try:
-            response = requests.get(url, timeout=45, allow_redirects=True)
-            statuses.append(response.status_code)
+            response = requests.get(url, timeout=60, allow_redirects=True)
+            results[label] = (response.status_code, sha256(response.content) if response.status_code == 200 else "")
         except requests.RequestException:
-            statuses.append(0)
-    ok = all(status == 200 for status in statuses)
-    record("Video URLs", "GET the repo raw file and the Pages copy", ok, f"statuses={statuses}")
+            results[label] = (0, "")
+    branch_ok = results["branch"][0] == 200 and results["branch"][1] == local
+    detail = (f"branch HTTP {results['branch'][0]} same_bytes={branch_ok}, "
+              f"pages HTTP {results['pages'][0]} (main line build)")
+    record("Video URLs", "GET the branch raw reel and the Pages copy", branch_ok and results["pages"][0] == 200, detail)
 
 
 def check_chain_views() -> None:
-    script = r"""
-import json, os, sys
+    script = r'''
+import json, os
 from dotenv import load_dotenv
 from genlayer_py import create_account, create_client, studionet
 load_dotenv('.env')
 key = os.environ['GENLAYER_PRIVATE_KEY']
 if not key.startswith('0x'):
     key = '0x' + key
-data = json.load(open('evidence/studionet_deployment.json'))
+data = json.load(open('evidence/studionet_Live_Milestone_v1.json'))
 address = data['contract_address']
 client = create_client(chain=studionet, account=create_account(key))
-access = json.loads(client.read_contract(address=address, function_name='get_access_model', args=[]))
-inv = json.loads(client.read_contract(address=address, function_name='check_vault_invariants', args=[]))
-stats = json.loads(client.read_contract(address=address, function_name='get_platform_stats', args=[]))
-print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'], 'invariant': inv['ok'], 'markets': stats['total_markets'], 'epoch': stats['current_epoch']}))
-"""
-    result = run([venv_exe("python"), "-c", script], timeout=180)
+
+def read(fn, args=None):
+    value = client.read_contract(address=address, function_name=fn, args=args or [])
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode('utf-8')
+    if isinstance(value, str):
+        value = json.loads(value)
+    return value
+
+access = read('get_access_model')
+inv = read('check_vault_invariants')
+stats = read('get_platform_stats')
+print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'],
+                  'invariant': inv['ok'], 'markets': stats['total_markets'],
+                  'epoch': stats['epoch'], 'native': stats['native_custody_wei'],
+                  'supply': stats['total_supply']}))
+'''
+    result = run([str(ROOT / ".venv" / "bin" / "python"), "-c", script], timeout=180)
     ok = False
     detail = (result.stderr or "")[:120]
     if result.returncode == 0:
         try:
             payload = json.loads(result.stdout.strip().splitlines()[-1])
-            ok = payload["owner"] is None and payload["roles"] == 0 and payload["invariant"] is True
+            ok = (
+                payload["owner"] is None and payload["roles"] == 0 and payload["invariant"] is True
+                and payload["native"] == payload["supply"]
+            )
             detail = json.dumps(payload)
         except Exception:
             ok = False
-    record("On chain views", "get_access_model and check_vault_invariants", ok, detail)
+    record("On chain views", "get_access_model, check_vault_invariants, get_platform_stats", ok, detail)
+
+
+TEMPLATE_NAMES = (
+    "Security Guard Lab",
+    "What-If Simulator",
+    "Consensus & Prompt Inspector",
+    "tools/generate_soundtrack.py",
+    "generate_soundtrack",
+    "build_video.py",
+)
+
+
+def check_template_names() -> None:
+    hits = []
+    suffixes = {".py", ".ts", ".tsx", ".md", ".json", ".html", ".css", ".js", ".mjs", ".yml", ".yaml"}
+    skip = {"node_modules", "dist", ".venv", "artifacts", ".git", "__pycache__"}
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+        if any(part in skip for part in path.relative_to(ROOT).parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for needle in TEMPLATE_NAMES:
+            if needle in text:
+                hits.append(f"{path.relative_to(ROOT)}:{needle}")
+    # The detector names the banned strings, so it must not scan itself.
+    hits = [item for item in hits if not item.startswith("scripts/presubmission_checks.py:")]
+    record("De templating", "grep public files for template component names", not hits, ", ".join(hits[:4]) or "none")
+
+
+def check_evidence_completeness() -> None:
+    try:
+        evidence = json.loads((ROOT / "evidence" / "studionet_Live_Milestone_v1.json").read_text(encoding="utf-8"))
+    except Exception as error:
+        record("Milestone evidence", "read evidence/studionet_Live_Milestone_v1.json", False, str(error)[:80])
+        return
+    consensus = evidence.get("consensus_proofs", [])
+    guards = evidence.get("guard_reverts", [])
+    markets = evidence.get("markets", [])
+    vault = evidence.get("vault_invariants", {})
+    identity = evidence.get("sha256_identity", {})
+    checks = evidence.get("local_checks", {})
+    ok = (
+        len(consensus) >= 3
+        and all(str(item.get("result")) == "MAJORITY_AGREE" for item in consensus)
+        and len(guards) >= 4
+        and all(item.get("matched_expected_revert") for item in guards)
+        and len(markets) >= 4
+        and vault.get("ok") is True
+        and checks.get("tests_returncode") == 0
+        and checks.get("lint_returncode") == 0
+        and identity.get("local_lf_bytes", 0) > 0
+    )
+    detail = (f"consensus={len(consensus)} guards={len(guards)} markets={len(markets)} "
+              f"invariant={vault.get('ok')} tests={checks.get('tests_summary')}")
+    record("Milestone evidence", "consensus proofs, guard reverts, invariants, local checks", ok, detail)
 
 
 def main() -> int:
@@ -287,6 +337,8 @@ def main() -> int:
     check_pages()
     check_video()
     check_video_policy()
+    check_evidence_completeness()
+    check_template_names()
     check_video_urls()
 
     width = max(len(name) for name, _, _ in results)

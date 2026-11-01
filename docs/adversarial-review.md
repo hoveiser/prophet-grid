@@ -1,167 +1,148 @@
-# Contract adversarial review
+# Adversarial review, Flagship v1
 
-Review of `contracts/prophet_grid.py` (v2, Steward remediation), deployed as
-`0x5d7776fc51b76DF271f232A56e2E76F3e2d0fcE8` on studionet. Tag
-`studionet-v2-remediated`.
-
-The builder program steward rejected the previous version because "any caller
-can resolve a market before an objective deadline and immediately advance the
-logical clock past its challenge window, while zero-winner and unresolved
-markets can permanently lock funds". Every clause is closed here, with a direct
-test and an on chain probe for each.
-
-## Time model
-
-There is no stored clock. One epoch is 60 seconds of deterministic block time,
-and `current_epoch` is derived inside every call from the transaction
-datetime. `close_epoch` and `resolution_timeout_epoch` are frozen at creation;
-`challenge_deadline_epoch` is frozen at proposal and is the only value a
-successful challenge may move, forward, never backward. `advance_market_clock`
-is a tombstone that reverts unconditionally. Compression of any window would
-require fewer real blocks to have been produced, which is a consensus layer
-property, not a caller input.
+Review of `contracts/prophet_grid.py` as shipped for `milestone-v1`. Every party
+that can call the contract is treated as hostile, including the resolver, the
+challenger, the listing desk, the model output and any fetched page. Findings are
+marked FIXED with the test or transaction that proves it, or OPEN with the reason.
 
 ## State machine
 
-| Status | Who may act | Method | Next status | Funds |
+| Status | Who may act | Method | Next | Funds |
 |---|---|---|---|---|
-| (none) | anyone | `create_market` | OPEN | none |
-| OPEN, `now < close_epoch` | anyone with balance | `buy_outcome_shares` | OPEN | wallet to vault, pool credited |
-| OPEN, `close_epoch <= now < timeout` | anyone | `propose_resolution` | CHALLENGE_WINDOW | unchanged, pot locked |
-| OPEN, `now >= resolution_timeout_epoch` | any participant | `expire_unresolved_market` | EXPIRED | nothing moves, refund bucket armed |
-| CHALLENGE_WINDOW, `now <= deadline`, count < 2 | anyone with bond | `challenge_resolution` | CHALLENGE_WINDOW, deadline restarts | upheld: bond debited to forfeit pot in the same tx; overturned: bond kept, verdict replaced |
-| CHALLENGE_WINDOW, `now > deadline` | anyone | `finalize_market` | FINALIZED, or REFUNDABLE_ZERO_WINNERS when the winning pool is 0 | unchanged, claims or refunds open |
-| FINALIZED | position holder | `claim_market_payout` | FINALIZED | vault to wallet, receipt written |
-| REFUNDABLE_ZERO_WINNERS or EXPIRED | position holder | `claim_refund` | unchanged | 100 percent principal, vault to wallet, receipt written |
-| any | anyone | `faucet_or_deposit`, `transfer_tokens` | unchanged | mint or wallet to wallet |
-| any | anyone | `advance_market_clock` | reverts | none |
+| none | any desk | `create_market` | OPEN | nothing moves |
+| OPEN, before close | any desk with collateral | `buy_outcome_shares`, `acquire_outcome_shares_payable` | OPEN | wallet or native deposit into the pool |
+| OPEN, after close | any desk | `resolve_market_via_consensus` | PROVISIONAL | pot locked, nothing paid |
+| OPEN, after timeout | any desk holding principal | `claim_refund` | REFUNDED | pot back to principals |
+| PROVISIONAL, before deadline | any desk except one with an open challenge | `file_resolution_challenge`, `challenge_market_resolution_payable` | CHALLENGED | bond into custody |
+| PROVISIONAL, after deadline | any desk | `finalize_market_settlement` | FINALIZED | fee to reserve, mode chosen |
+| CHALLENGED, before timeout | any desk | `audit_resolution_challenge` | PROVISIONAL | bond to reserve or back to challenger |
+| CHALLENGED, after deadline | any desk | `finalize_market_settlement` | FINALIZED | open bonds returned first |
+| FINALIZED payout, after deadline | holders with a winning side | `claim_market_winnings` | FINALIZED or REFUNDED | vault to wallet |
+| FINALIZED refund mode | any holder | `claim_refund` | REFUNDED | principals back |
+| hedge LOCKED | basket owner only | `release_conditional_hedge` | RELEASED | payoff plus headroom back, shortfall to reserve |
 
-No status has an owner-only transition. There is no owner field in storage.
+## Liveness of locked value
 
-## Steward clause coverage
+- Funded but never resolved: `claim_refund` unlocks for every holder after
+  `resolution_timeout_epoch`, which creation forces to be later than any possible
+  challenge deadline. Proven on chain: book PG:4 refunded 50 units after its source
+  stopped loading.
+- Resolved and never finalized: `finalize_market_settlement` is permissionless once
+  the deadline passes, and it returns open bonds first.
+- Resolved, challenged, never audited: the same finalize path aborts the challenge
+  and returns the bond.
+- Resolved and refunded while a challenge is open: `claim_refund` aborts open
+  challenges and returns their bonds. This was a lock-up bug found in this review
+  and fixed before shipping, see finding 1.
+- Settled payout: every claimant can claim independently; the last claimant on a
+  side takes the integer remainder so no dust is stranded.
+- Hedge basket: releasable by its owner at the later of the two legs' gates, with
+  unsettled legs priced at principal equivalent.
 
-| Clause | Closure | Direct test | On chain probe |
-|---|---|---|---|
-| Resolution before an objective deadline | `propose_resolution` requires `now >= close_epoch` | `test_propose_before_close_reverts` | `guard:early_resolution` |
-| Clock fast forward past the window | clock deleted, tombstone reverts, epochs are block time | `test_clock_manipulation_always_reverts`, `test_epochs_only_move_with_real_block_time` | `guard:advance_clock` |
-| Finalize or claim inside the window | `finalize_market` requires `now > challenge_deadline_epoch`; claims require FINALIZED | `test_finalize_before_window_elapses_reverts`, `test_claim_before_window_close_reverts` | `guard:early_finalize`, `guard:early_claim` |
-| Challenge restarts the window | deadline moves to challenge epoch plus window; finalize at the old deadline now reverts | `test_challenge_restarts_the_window_and_finalize_waits_again` | `challenge:eth_blob` then `guard` order in the scenario |
-| Trading after close | `buy_outcome_shares` requires `now < close_epoch` | trading gate tests | `guard:early_trading` |
-| Zero winner locks funds | finalize routes to `REFUNDABLE_ZERO_WINNERS`, `claim_refund` returns principal to everyone | `test_zero_winner_refund_returns_full_principal`, `test_zero_winner_double_refund_reverts`, `test_zero_winner_finalize_twice_reverts` | `refund:ai_sdk:alice`, `refund:ai_sdk:bob` |
-| Unresolved market locks funds | `resolution_timeout_epoch` plus `expire_unresolved_market` plus `claim_refund` | `test_expire_before_timeout_reverts`, `test_expire_at_timeout_flips_to_expired`, `test_expired_market_refunds_every_participant` | `expire:abandoned`, `refund:abandoned:alice`, `refund:abandoned:bob` |
-| Stale proposal after timeout | `propose_resolution` reverts, refund path is the only exit | expired market tests | `guard:post_timeout_proposal` |
+## Races checked
 
-## 1. Liveness
+- resolve versus timeout refund: `now <= timeout` against `now > timeout`, strict on
+  one side.
+- challenge versus finalize: `now < deadline` against `now >= deadline`.
+- claim versus finalize: FINALIZED against PROVISIONAL or CHALLENGED.
+- buy versus resolve: OPEN and `now < close_epoch` against not OPEN.
+- claim versus claim: shares are zeroed in the same write that pays.
+- refund versus claim: refund mode and payout mode are exclusive fields.
+- double challenge by the same desk or on the same book: rejected by the gate.
 
-| Locked state | Escape | Verdict |
-|---|---|---|
-| OPEN with positions | anyone proposes after close; anyone expires after the timeout | safe, both paths exist |
-| CHALLENGE_WINDOW | anyone finalizes after the deadline; challenges are capped at 2 so the window cannot be extended forever | safe |
-| FINALIZED | each holder claims its own share | safe |
-| REFUNDABLE_ZERO_WINNERS | every holder calls `claim_refund` | safe |
-| EXPIRED | every holder calls `claim_refund` | safe |
+## Invariant
 
-Deadlines use objective epochs only. `challenge_resolution` requires
-`now <= deadline`, `finalize_market` requires `now > deadline`, so the two
-guards are mutually exclusive at the boundary and a challenge can never be
-finalized around inside its own window.
-
-## 2. Races
-
-- buy versus close: the same `close_epoch` comparison decides both, first
-  execution wins deterministically.
-- propose versus expire: both require OPEN and propose requires
-  `now < resolution_timeout_epoch`, expire requires `now >= timeout`. Mutually
-  exclusive.
-- challenge versus finalize: separated by the deadline comparison, and the
-  challenge count cap bounds the total delay.
-- finalize twice: the second sees a non CHALLENGE_WINDOW status and reverts
-  (`test_zero_winner_finalize_twice_reverts`).
-- claim versus refund: one shared `receipts` key per market and account, so the
-  two paths cannot both pay (`test_zero_winner_double_refund_reverts`,
-  `guard:double_refund`, `guard:double_claim`).
-- refund wrong status: `[EXPECTED] no refund to claim` (`guard:refund_wrong_status`).
-- double claim: the receipt key is written in the same transaction that pays.
-
-## 3. Accounting
-
-Invariant: `vault_custody_balance == sum(unclaimed market liabilities)`. A
-challenge bond never sits in a separate limbo bucket: it is debited to the
-forfeit pot (upheld) or retained by the challenger (overturned) inside the same
-transaction that re-runs consensus, so the identity holds at every block.
-Exposed by `check_vault_invariants()`. Asserted after every transition in the
-direct suite and again on chain after the full scenario, including after both
-refund lifecycles (expect `delta == 0`).
-
-Rounding: `test_dust_is_conserved_to_the_last_claimant` proves the last claimant
-absorbs the remainder and the sum equals the pot. Refunds:
-`test_expired_market_refunds_every_participant` proves 100 percent principal
-back to zero, `test_zero_winner_refund_includes_forfeited_bond` proves pro rata
-scaling with a forfeited bond. `test_all_three_settlement_branches_conserve_funds`
-runs payout, invalid refund and zero winner refund branches in one market set
-and reconciles every wallet and the vault to exact wei with the supply
-unchanged.
-
-## 4. Input validation
-
-Length caps on question and criteria, category allow list, URL scheme, host,
-credential and private range checks, amount floors and ceilings, duration
-bounds (1 to 525600 epochs), window bounds (1 to 1440 epochs), grace bounds
-(1 to 40320 epochs), market cap, challenge cap, zero and self transfer
-rejection. Each has a negative test, including constructor bounds
-(`test_init_rejects_out_of_bounds_window`, `test_init_rejects_out_of_bounds_grace`).
-
-## 5. Consensus
-
-The verdict is produced only inside `gl.eq_principle.prompt_comparative` over
-sanitized renderings of the primary source and the filed evidence. The payout
-is driven by a three value label set, never by a free form model number.
-Validators re-fetch both sources and must agree exactly on the outcome band,
-the confidence anchor and the authenticity flag. Proposal, challenge
-re-evaluation and window restart all pass the same gate. Direct tests exercise
-the leader path only; live studionet transactions prove validator behaviour,
-including that a consensus failure during a challenge leaves state and bonds
-untouched (`test_challenge_consensus_failure_leaves_state_unchanged`).
-
-Prompt injection: markup and instruction text inside evidence are defused and
-stripped before the prompt. `test_prompt_injection_markup_is_stripped` proves
-the raw closing tag and braces never reach the prompt. This is tested
-sanitization, not a proof of injection immunity.
+`total_supply == native_custody_balance == wallet_balances + vault_custody_balance`
+and `vault_custody_balance == locked_pots + pending_bonds + hedge_reservations +
+protocol_reserve + refundable`. Every value movement goes through one of `_mint`,
+`_credit`, `_debit`, `_park_native` plus a single term counter, so both sides of the
+identity move together. `check_vault_invariants()` recomputes the terms on chain and
+the evidence additionally compares the reported native custody with `eth_getBalance`
+of the contract address from the node.
 
 ## Findings
 
 ### FIXED
 
-| Finding | Proof |
-|---|---|
-| Permissionless clock could close a challenge window early (v1 finding A) | clock removed, epochs derive from block datetime, tombstone revert: `test_clock_manipulation_always_reverts`, `test_epochs_only_move_with_real_block_time`, on chain `guard:advance_clock` |
-| Zero winner pot stayed locked forever (v1 finding B) | `REFUNDABLE_ZERO_WINNERS` plus `claim_refund`, `test_zero_winner_refund_returns_full_principal`, on chain `refund:ai_sdk:*` |
-| OPEN market had no liveness valve (v1 finding C) | `resolution_timeout_epoch` plus `expire_unresolved_market` plus `claim_refund`, `test_expire_at_timeout_flips_to_expired`, on chain `expire:abandoned` and `refund:abandoned:*` |
-| Owner or creator resolution bypass | `test_no_deterministic_resolution_entrypoints`, `test_access_model_declares_no_privileged_role` |
-| Premature resolution before the deadline | `test_propose_before_close_reverts`, on chain `guard:early_resolution` |
-| Premature claim before the window closes | `test_claim_before_window_close_reverts`, on chain `guard:early_claim` |
-| Finalize around a pending challenge | `test_finalize_before_window_elapses_reverts`, window restart test, on chain `guard:early_finalize` |
-| Double claim or double refund | `test_claim_twice_reverts`, `test_zero_winner_double_refund_reverts`, on chain `guard:double_claim`, `guard:double_refund` |
-| Losing side or zero share claim | `test_losing_side_claim_reverts`, `test_zero_share_claim_reverts`, on chain `guard:losing_claim` |
-| Rounding loss in payouts or refunds | `test_dust_is_conserved_to_the_last_claimant`, `test_all_three_settlement_branches_conserve_funds` |
-| Malformed or ambiguous model output settles a market | `test_malformed_json_fails_closed`, `test_missing_confidence_fails_closed`, `test_confidence_out_of_range_fails_closed` |
-| Unauthenticated evidence pays a side | `test_unauthenticated_source_refunds` |
-| Prompt markup reaches the model | `test_prompt_injection_markup_is_stripped` |
-| Challenge bond double refund or stalled challenge | single transaction challenge (file plus audit fused), status and count guards, `test_challenge_consensus_failure_leaves_state_unchanged` |
+1. **Open challenge bond stranded by the timeout refund.** `claim_refund` moved a
+   PROVISIONAL or CHALLENGED book to REFUNDED without returning the bond of a pending
+   challenge, and `finalize_market_settlement` could no longer run, so the challenger
+   lost the bond permanently. Fixed by `_abort_pending_challenges`, now called from
+   both paths. Proof: `test_timeout_refund_returns_an_open_challenge_bond`. This fix
+   required a new deployment, so the contract address in the README is the reviewed
+   build, not the intermediate one.
+2. **Payable methods could revert, breaking Rule 8.** `_file_challenge` validated the
+   counter evidence url after mutating the market, and `_open_hedge` raised when the
+   collateral floor was not met. Both now validate before any mutation, and the
+   payable entry points check with the non raising `_url_reason` and a collateral
+   pre check, so a refusal parks the value instead of reverting. Proofs:
+   `test_payable_challenge_with_a_bad_url_soft_fails`,
+   `test_payable_hedge_below_minimum_soft_fails`,
+   `test_payable_hedge_on_unknown_market_soft_fails`.
+3. **Double counted native value on a challenge surplus.** The surplus branch added
+   the whole deposit to supply, vault and native custody a second time after
+   `_park_native` had already done it. Removed; the surplus now only moves between the
+   refundable term and the vault. Proof: `test_payable_challenge_parks_the_surplus_as_refundable`
+   plus the invariant assertion in the same test.
+4. **Refund bookkeeping could leave unclaimed shares non zero.** The first draft
+   decremented the wrong side, which would have let a second desk claim again. Fixed
+   with explicit per side decrements and a last claimant branch. Proofs:
+   `test_double_refund_claim_is_rejected`, `test_refund_band_returns_principal_to_everyone`.
+5. **Winning budget could exceed the distributable when both sides had weight.**
+   Budgets are now derived as `yes_budget` and `distributable - yes_budget`, so they
+   sum exactly, and the last claimant per side receives the remainder. Proofs:
+   `test_scalar_split_pays_both_sides_exactly`,
+   `test_many_holders_conserve_the_winning_budget`.
+6. **A winning side with no holders locked the whole pot.** Settlement now switches to
+   refund mode and takes no fee when any side with positive weight has no unclaimed
+   shares. Proofs: `test_zero_winner_market_settles_as_refund`, and on chain book PG:7.
+7. **A model response could decide a payout.** The model only reports two numbers and
+   a corroboration flag; the band, the weights, the fee and the reward are derived by
+   `_decide` from the snapshotted pools, and `_checked` re-derives them after
+   consensus and rejects any mismatch. Proofs:
+   `test_prompt_injection_in_evidence_cannot_change_the_rule`,
+   `test_resolve_fail_closed_on_missing_fields`,
+   `test_resolve_refunds_when_the_two_sources_disagree`.
+8. **Off grid or unbounded parameters.** Strike and corridor must sit on the 250 bps
+   grid, all three windows have a floor of 60 seconds and a ceiling, stake and bond
+   have bounds, urls are https only with private and loopback hosts rejected. Proofs:
+   the parametrized listing tests and `test_create_market_enforces_window_floor_and_ceiling`.
+9. **Consumer registration spoofing.** `register_ecosystem_consumer` registers
+   `gl.message.sender_address` only, so a desk cannot claim to be another contract, and
+   names are now unique. Proofs: `test_register_ecosystem_consumer_and_acknowledge`,
+   `test_acknowledge_requires_registration`, `test_consumer_names_are_unique`.
+10. **Unpaid challenger reward could overdraw the reserve.** The reward is
+    `min(pot * 2500 / 10000, protocol_reserve)` and the payout path takes the same
+    minimum, so a reward can never exceed what the reserve holds. Proof:
+    `test_overturned_challenge_returns_the_bond_and_pays_the_reward`.
 
 ### OPEN
 
-**D. Direct mode tests do not exercise validators.**
-They run the leader only. Validator agreement is covered by the live studionet
-transactions in `evidence/studionet_deployment.json`, where every consensus
-step must finalize `FINALIZED` with `MAJORITY_AGREE`.
+1. **The resolver picks which of the two declared sources is filed.** The choice is
+   limited to the two urls stored on the book, both are public and the outcome can
+   still be challenged, but the first resolver does get to pick the framing. A
+   commit reveal stage would remove it and is the natural next version.
+2. **A challenger gets no reward until the reserve holds fees.** Correct by
+   construction, but it means the very first challenge on a fresh deployment is
+   unpaid effort.
+3. **A hedge basket is releasable only by its owner.** If the owner key is lost the
+   reservation stays locked in the vault forever. No other desk is harmed because the
+   term is counted as reserved, but there is no third party rescue path.
+4. **Anyone may list unlimited books.** Storage grows with no fee. It is a griefing
+   channel, not a fund risk, and the terminal hides unfunded listings by default.
+5. **Direct mode runs the leader path only.** Validator exactness is demonstrated by
+   the on chain `MAJORITY_AGREE` receipts with the vote counts in
+   `evidence/studionet_Live_Milestone_v1.json`, not by the unit tests.
+6. **The contract cannot read its own native balance.** Custody is contract accounting
+   plus the external node cross check in the evidence. A plain value transfer to the
+   contract address that bypasses a payable method is not reachable through the
+   studionet write path, and if it ever becomes reachable the accounting would
+   understate rather than overstate custody.
 
-**E. A griefer can still challenge twice.**
-Each successful challenge restarts a fresh window, so settlement can be delayed
-by at most two windows (deployed window is 10 epochs, bounded delay 20 minutes)
-and the bond is forfeited on an upheld challenge, making the delay costly.
-No funds move during the delay beyond the locked pot.
+## Conclusion
 
-Nothing currently open allows a payout to the wrong party or a permanently
-locked principal: both lock cases have an enforced refund path verified on
-chain.
+Ten findings were fixed, each with a named test, and two of them (the stranded
+challenge bond and the refund bookkeeping) were fixed after the first live run, which
+is why the shipped contract is a fresh deployment. Six items remain open; none of them
+let a party take funds that are not theirs, and each is listed above with the reason
+and the shape of a fix.

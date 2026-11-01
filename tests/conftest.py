@@ -1,18 +1,20 @@
-"""Shared fixtures for ProphetGrid direct mode tests.
+"""Shared fixtures and helpers for ProphetGrid Flagship v1 direct mode tests.
 
-The unlink shim below is a Windows hardening measure required by the
-genlayer test harness: cached SDK directories are read only and Python
-raises PermissionError when it tries to clear them during cleanup.
+The unlink shim below is a Windows hardening measure required by the genlayer
+test harness: cached SDK directories are read only and Python raises
+PermissionError when it clears them during cleanup.
 
-v2 time model: contracts derive current_epoch from the objective
-transaction datetime. Tests control it exclusively through the direct_vm
-warp cheatcode, exactly like a miner would move real block time forward.
+Time model: the contract reads the transaction datetime from the GenVM message.
+The harness refreshes sender, origin and value in the cached message dict when
+the test mutates the VM, but not the datetime, so `set_time` below writes the
+same dict entry. That is what makes every window enforceable in tests without
+any clock advancing method on the contract.
 """
 
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+import time as _time
 
 import pytest
 
@@ -50,153 +52,198 @@ if sys.platform.startswith("win"):
     os.rmdir = _safe_rmdir
 
 
-WINDOW = 2
-BOND = 50
-GRACE = 3
-MARKET_DURATION = 4
+# Stake scale: 1 UNIT is 10**15 wei, the contract minimum deposit.
+UNIT = 10 ** 15
+CLOSE_WINDOW = 120
+CHAL_WINDOW = 60
+BOND = 10 * UNIT
+BASE_EPOCH = 1_800_000_000
 
-BASE_UTC = datetime(2026, 1, 1, tzinfo=timezone.utc)
-EPOCH_BASE = int(BASE_UTC.timestamp()) // 60
-
-
-def epoch_iso(epoch: int) -> str:
-    """ISO timestamp 30 seconds into the given epoch."""
-    seconds = (epoch - EPOCH_BASE) * 60 + 30
-    return (BASE_UTC + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def warp_epoch(vm, epoch: int) -> None:
-    """Move the transaction datetime into the requested epoch."""
-    vm.warp(epoch_iso(epoch))
-
-
-QUESTION = "Will the Ethereum blob base fee average below 0.01 gwei for the next 30 days?"
-CRITERIA = (
-    "Resolve YES when the published 30 day average blob base fee stays below 0.01 gwei, "
-    "NO when it closes at or above 0.01 gwei, and refund when the source is silent."
+QUESTION = (
+    "Does the ECB deposit facility rate fall by at least 50 basis points before the "
+    "end of the fourth quarter?"
 )
-PRIMARY = "https://api.example.com/eth/blob-fees"
-EVIDENCE = "https://news.example.com/eth/blob-fee-report"
-COUNTER = "https://research.example.com/blob-fee-audit"
+CRITERIA = (
+    "Express the observed cumulative easing as basis points of a 200 basis point "
+    "reference corridor. Resolve YES when the print reaches the strike, NO below it, "
+    "and refund when the two sources contradict each other."
+)
+CATEGORY = "MACRO"
+PRIMARY = "https://api.example.com/ecb/deposit-rate"
+SECONDARY = "https://news.example.com/ecb/q4-decision"
+COUNTER = "https://research.example.com/ecb-replay"
 
 PRIMARY_TEXT = (
-    "Ethereum blob fee dashboard. The 30 day moving average blob base fee printed "
-    "0.004 gwei on the snapshot block and the series stayed flat."
+    "Official rate dashboard. The deposit facility rate fell 150 basis points across "
+    "the corridor, which is 75 percent of the reference scale for the quarter."
 )
-EVIDENCE_TEXT = (
-    "Independent market report. Blob fees held near 0.004 gwei across the whole "
-    "30 day window, which confirms the dashboard reading without gaps."
+SECONDARY_TEXT = (
+    "Wire report confirming the same 150 basis point easing over the quarter with an "
+    "identical reference corridor and no contradictory prints."
 )
 COUNTER_TEXT = (
-    "Audit memo. A replay of the same 30 day window shows blob fees near 0.03 gwei "
-    "after the repricing, which contradicts the dashboard snapshot."
+    "Audit replay. The cumulative easing printed only 25 basis points on the same "
+    "corridor, which contradicts the dashboard above."
 )
 
-PROMPT_PATTERN = r"(?s).*independent resolution auditor.*"
+PROMPT_PATTERN = r"(?s).*Extract macro data for a derivatives strike settlement.*"
 
 
-def verdict(stance="YES", confidence=90, authenticated=True, summary="Evidence supports the stance."):
+_EPOCHS: dict = {}
+
+
+def iso(epoch: int) -> str:
+    return _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(epoch))
+
+
+def set_time(vm, epoch: int) -> int:
+    """Move the deterministic transaction datetime to an absolute epoch."""
+    epoch = int(epoch)
+    text = iso(epoch)
+    vm.warp(text)
+    module = sys.modules.get("genlayer.gl")
+    raw = getattr(module, "message_raw", None) if module is not None else None
+    if isinstance(raw, dict):
+        raw["datetime"] = text
+    _EPOCHS[id(vm)] = epoch
+    return epoch
+
+
+def advance(vm, seconds: int) -> int:
+    return set_time(vm, current(vm) + seconds)
+
+
+def current(vm) -> int:
+    return _EPOCHS.get(id(vm), BASE_EPOCH)
+
+
+def print_payload(primary=7500, secondary=7500, corroborated=True, summary="Both prints agree."):
     return {
-        "stance": stance,
-        "confidence": confidence,
-        "source_authenticated": authenticated,
+        "primary_observed_bps": primary,
+        "secondary_observed_bps": secondary,
+        "corroborated": corroborated,
         "summary": summary,
     }
 
 
-def apply_verdict(
-    vm,
-    payload,
-    primary_text=PRIMARY_TEXT,
-    evidence_text=EVIDENCE_TEXT,
-    counter_text=COUNTER_TEXT,
-    prompt_pattern=PROMPT_PATTERN,
-):
-    """Register fresh web and model mocks for a single adjudication."""
+def mock_evidence(vm, payload, primary_text=PRIMARY_TEXT, secondary_text=SECONDARY_TEXT,
+                  counter_text=COUNTER_TEXT):
+    """Install fresh web and model mocks for one adjudication."""
     vm.clear_mocks()
     vm.mock_web(r".*api\.example\.com.*", {"status": 200, "body": primary_text})
-    vm.mock_web(r".*news\.example\.com.*", {"status": 200, "body": evidence_text})
+    vm.mock_web(r".*news\.example\.com.*", {"status": 200, "body": secondary_text})
     vm.mock_web(r".*research\.example\.com.*", {"status": 200, "body": counter_text})
     vm.mock_web(r".*\.example\.com.*", {"status": 200, "body": counter_text})
-    if isinstance(payload, str):
-        vm.mock_llm(prompt_pattern, payload)
-    else:
-        vm.mock_llm(prompt_pattern, json.dumps(payload))
+    body = payload if isinstance(payload, str) else json.dumps(payload)
+    vm.mock_llm(PROMPT_PATTERN, body)
 
 
 @pytest.fixture
-def grid(direct_vm, direct_deploy):
-    warp_epoch(direct_vm, EPOCH_BASE)
-    return direct_deploy("contracts/prophet_grid.py", WINDOW, BOND, GRACE)
+def vm_time(direct_vm):
+    set_time(direct_vm, BASE_EPOCH)
+    return direct_vm
 
 
 @pytest.fixture
-def funded(direct_vm, grid, direct_alice, direct_bob, direct_charlie):
+def grid(vm_time, direct_deploy):
+    contract = direct_deploy("contracts/prophet_grid.py", CLOSE_WINDOW, CHAL_WINDOW, BOND)
+    set_time(vm_time, BASE_EPOCH)
+    return contract
+
+
+@pytest.fixture
+def funded(vm_time, grid, direct_alice, direct_bob, direct_charlie):
+    """Fund three desks with backed collateral through the payable entry point."""
     for account in (direct_alice, direct_bob, direct_charlie):
-        direct_vm.sender = account
-        grid.faucet_or_deposit(1000)
-    direct_vm.sender = direct_alice
+        vm_time.sender = account
+        vm_time.value = 1000 * UNIT
+        grid.fund_pgt_vault_payable()
+    vm_time.value = 0
+    vm_time.sender = direct_alice
+    assert invariant(grid)["ok"] is True
     return grid
 
 
-def open_market(contract, question=QUESTION, duration=MARKET_DURATION):
-    return contract.create_market(question, "CRYPTO", PRIMARY, CRITERIA, duration)
+@pytest.fixture
+def desk(funded):
+    return funded
 
 
-def trade(vm, contract, account, market_id, side, amount):
+def deposit(vm, contract, account, units):
     vm.sender = account
-    return contract.buy_outcome_shares(market_id, side, amount)
+    vm.value = units * UNIT
+    out = json.loads(contract.fund_pgt_vault_payable())
+    vm.value = 0
+    return out
 
 
-def resolve(vm, contract, account, market_id, payload, evidence=EVIDENCE):
-    """Propose resolution at the exact objective close epoch."""
-    state = json.loads(contract.get_market(market_id))
-    warp_epoch(vm, state["close_epoch"])
-    apply_verdict(vm, payload)
+def create(vm, contract, account, question=QUESTION, strike=5000, corridor=1000,
+           close=CLOSE_WINDOW, chal=CHAL_WINDOW, margin=600):
     vm.sender = account
-    return contract.propose_resolution(market_id, evidence)
+    raw = contract.create_market(
+        question, CATEGORY, PRIMARY, SECONDARY, CRITERIA, strike, corridor, close, chal, margin
+    )
+    return json.loads(raw)["market_id"]
 
 
-def challenge(vm, contract, account, market_id, payload, counter=COUNTER):
-    """Bond backed challenge with its own live re-evaluation verdict."""
-    apply_verdict(vm, payload)
+def buy(vm, contract, account, market_id, side, units):
     vm.sender = account
-    return contract.challenge_resolution(market_id, counter)
+    return contract.buy_outcome_shares(market_id, side, units * UNIT)
 
 
-def attempt_finalize(vm, contract, account, market_id):
-    """Call finalize_market without touching the clock."""
+def stake(vm, contract, account, market_id, side, units):
     vm.sender = account
-    return contract.finalize_market(market_id)
+    vm.value = units * UNIT
+    out = json.loads(contract.acquire_outcome_shares_payable(market_id, side))
+    vm.value = 0
+    return out
+
+
+def resolve(vm, contract, account, market_id, payload=None, evidence=PRIMARY):
+    mock_evidence(vm, payload or print_payload())
+    vm.sender = account
+    raw = contract.resolve_market_via_consensus(market_id, evidence)
+    vm.clear_mocks()
+    return json.loads(raw)
+
+
+def challenge(vm, contract, account, market_id, counter=COUNTER):
+    vm.sender = account
+    return json.loads(contract.file_resolution_challenge(market_id, counter))
+
+
+def challenge_payable(vm, contract, account, market_id, units, counter=COUNTER):
+    vm.sender = account
+    vm.value = units * UNIT
+    out = json.loads(contract.challenge_market_resolution_payable(market_id, counter))
+    vm.value = 0
+    return out
+
+
+def audit(vm, contract, account, market_id, payload):
+    mock_evidence(vm, payload)
+    vm.sender = account
+    out = json.loads(contract.audit_resolution_challenge(market_id))
+    vm.clear_mocks()
+    return out
 
 
 def finalize(vm, contract, account, market_id):
-    """Wait the challenge window out with real time, then finalize."""
-    state = json.loads(contract.get_market(market_id))
-    warp_epoch(vm, state["challenge_deadline_epoch"] + 1)
     vm.sender = account
-    return contract.finalize_market(market_id)
+    return json.loads(contract.finalize_market_settlement(market_id))
 
 
 def claim(vm, contract, account, market_id):
     vm.sender = account
-    return contract.claim_market_payout(market_id)
+    return json.loads(contract.claim_market_winnings(market_id))
 
 
-def claim_refund(vm, contract, account, market_id):
+def refund(vm, contract, account, market_id):
     vm.sender = account
-    return contract.claim_refund(market_id)
+    return json.loads(contract.claim_refund(market_id))
 
 
-def expire(vm, contract, account, market_id):
-    """Wait for the resolution timeout, then expire the market."""
-    state = json.loads(contract.get_market(market_id))
-    warp_epoch(vm, state["resolution_timeout_epoch"])
-    vm.sender = account
-    return contract.expire_unresolved_market(market_id)
-
-
-def market_state(contract, market_id):
+def state(contract, market_id):
     return json.loads(contract.get_market(market_id))
 
 
@@ -204,15 +251,28 @@ def stats(contract):
     return json.loads(contract.get_platform_stats())
 
 
-def invariants(contract):
-    return json.loads(contract.check_vault_invariants())
+def invariant(contract) -> dict:
+    return contract.check_vault_invariants()
 
 
-def balance(contract, account):
+def custody(contract) -> dict:
+    return contract.get_custody_accounting_summary()
+
+
+def balance(contract, account) -> int:
     return int(contract.token_balance_of(account.as_hex))
 
 
-def settle_market(vm, contract, market_id, payload, operator, evidence=EVIDENCE):
-    """Propose, wait the challenge window out with real time and finalize."""
-    resolve(vm, contract, operator, market_id, payload, evidence)
-    finalize(vm, contract, operator, market_id)
+def refundable(contract, account) -> int:
+    return int(contract.get_refundable_balance(account.as_hex))
+
+
+def portfolio(contract, account):
+    return json.loads(contract.get_trader_portfolio(account.as_hex))
+
+
+def settle(vm, contract, market_id, operator):
+    """Wait out the challenge window and finalize an already resolved market."""
+    deadline = state(contract, market_id)["challenge_deadline_epoch"]
+    set_time(vm, deadline)
+    return finalize(vm, contract, operator, market_id)

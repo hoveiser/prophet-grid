@@ -4,8 +4,8 @@
 The token is read from .env and injected into a git credential helper through
 the environment only. It is never written to disk and never printed.
 
-Steps: create the public repo if needed, commit, tag studionet-v2-remediated,
-push main, push frontend/dist to gh-pages, enable Pages and verify the live URL.
+Steps: create the public repo if needed, commit, tag the release, push main,
+push frontend/dist to gh-pages, enable Pages and verify the live URL.
 """
 
 from __future__ import annotations
@@ -31,13 +31,9 @@ HELPER = ROOT / "tools" / "git-credential-helper.sh"
 DIST = ROOT / "frontend" / "dist"
 PAGES_WORKTREE = ROOT / "artifacts" / "gh-pages"
 REPORT = ROOT / "evidence" / "publish_report.json"
+RELEASE_TAG = os.environ.get("RELEASE_TAG", "milestone-v1")
 COMMIT_NAME = "hoveiser"
 COMMIT_EMAIL = "hoveiser@users.noreply.github.com"
-TAG = "studionet-v2-remediated"
-COMMIT_MESSAGE = (
-    "Remediate steward rejection: objective epoch deadlines, enforced challenge "
-    "window, zero-winner and timeout refund paths, studionet v2 evidence"
-)
 
 
 def now_iso() -> str:
@@ -156,7 +152,7 @@ def commit_and_push(token: str) -> tuple[str, str]:
 
     status = run(["git", "status", "--porcelain"], token).stdout.strip()
     if status:
-        git("commit", "-m", COMMIT_MESSAGE, token=token)
+        git("commit", "-m", "Ship ProphetGrid contract, tests, frontend and studionet evidence", token=token)
     head = run(["git", "rev-parse", "HEAD"], token).stdout.strip()
     branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], token).stdout.strip()
     log(f"branch {branch} at {head[:12]}")
@@ -171,14 +167,14 @@ def commit_and_push(token: str) -> tuple[str, str]:
         raise RuntimeError(f"main push failed: {stderr[:600]}")
     log("main pushed")
 
-    tags = run(["git", "tag", "--list", TAG], token).stdout.strip()
+    tags = run(["git", "tag", "--list", RELEASE_TAG], token).stdout.strip()
     if not tags:
-        git("tag", "-a", TAG, "-m", "ProphetGrid studionet v2 steward remediation deployment", token=token)
-    push_tag = git("push", "origin", TAG, token=token, check=False)
+        git("tag", "-a", RELEASE_TAG, "-m", f"ProphetGrid {RELEASE_TAG} deployment", token=token)
+    push_tag = git("push", "origin", RELEASE_TAG, token=token, check=False)
     if push_tag.returncode != 0:
         stderr = (push_tag.stderr or "").replace(token, "***")
         raise RuntimeError(f"tag push failed: {stderr[:600]}")
-    log(f"tag {TAG} pushed")
+    log(f"tag {RELEASE_TAG} pushed")
     return head, branch
 
 
@@ -303,7 +299,7 @@ def main() -> int:
         "repository": f"https://github.com/{OWNER}/{REPO}",
         "branch": branch,
         "commit": head,
-        "tag": TAG,
+        "tag": RELEASE_TAG,
         "pages_branch": pages_branch,
         "pages_status": pages.get("status"),
         "pages_url": PAGES_URL,
