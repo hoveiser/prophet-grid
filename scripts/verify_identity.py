@@ -3,7 +3,7 @@
 
 Checks that the local LF file, the git blob, the on chain code and the GitHub
 raw file are byte identical. Writes evidence/sha256_identity.json and updates
-the identity block of evidence/studionet_deployment.json.
+the identity block of evidence/studionet_Live_Milestone_v1.json.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from genlayer_py import create_account, create_client, studionet
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_REL = "contracts/prophet_grid.py"
 CONTRACT = ROOT / CONTRACT_REL
-DEPLOY_EVIDENCE = ROOT / "evidence" / "studionet_deployment.json"
+DEPLOY_EVIDENCE = ROOT / "evidence" / "studionet_Live_Milestone_v1.json"
 IDENTITY_FILE = ROOT / "evidence" / "sha256_identity.json"
 REPO = "hoveiser/prophet-grid"
 
@@ -118,7 +118,7 @@ def main() -> int:
         key = "0x" + key
 
     if not DEPLOY_EVIDENCE.exists():
-        print("evidence/studionet_deployment.json is missing")
+        print("evidence/studionet_Live_Milestone_v1.json is missing")
         return 2
     deployment = json.loads(DEPLOY_EVIDENCE.read_text(encoding="utf-8"))
     address = deployment.get("contract_address")

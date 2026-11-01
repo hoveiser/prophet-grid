@@ -13,7 +13,7 @@ key = os.environ["GENLAYER_PRIVATE_KEY"]
 if not key.startswith("0x"):
     key = "0x" + key
 client = create_client(chain=studionet, account=create_account(key))
-checkpoint = json.load(open(ROOT / "evidence" / "_checkpoint.json"))
+checkpoint = json.load(open(ROOT / "evidence" / "_checkpoint_v1.json"))
 address = checkpoint["contract_address"]
 
 
@@ -35,7 +35,7 @@ for market_id in range(1, count + 1):
                 "outcome": state["provisional_outcome"],
                 "resolved_at": state["resolved_at_step"],
                 "deadline": state["challenge_deadline_step"],
-                "clock": state["clock_step"],
+                "epoch": state["now"],
                 "settlement_ready": state["settlement_ready"],
                 "claim_block_reason": state["claim_block_reason"],
                 "total_pot": state["total_pot"],

@@ -97,7 +97,7 @@ def check_dashes() -> None:
 def check_addresses() -> None:
     config = (ROOT / "frontend" / "src" / "config.ts").read_text(encoding="utf-8")
     addresses = set(ADDRESS_PATTERN.findall(config))
-    evidence = json.loads((ROOT / "evidence" / "studionet_deployment.json").read_text(encoding="utf-8"))
+    evidence = json.loads((ROOT / "evidence" / "studionet_Live_Milestone_v1.json").read_text(encoding="utf-8"))
     deployed = evidence.get("contract_address")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     ok = len(addresses) == 1 and deployed in addresses and deployed in readme
@@ -224,13 +224,13 @@ load_dotenv('.env')
 key = os.environ['GENLAYER_PRIVATE_KEY']
 if not key.startswith('0x'):
     key = '0x' + key
-data = json.load(open('evidence/studionet_deployment.json'))
+data = json.load(open('evidence/studionet_Live_Milestone_v1.json'))
 address = data['contract_address']
 client = create_client(chain=studionet, account=create_account(key))
 access = json.loads(client.read_contract(address=address, function_name='get_access_model', args=[]))
 inv = json.loads(client.read_contract(address=address, function_name='check_vault_invariants', args=[]))
 stats = json.loads(client.read_contract(address=address, function_name='get_platform_stats', args=[]))
-print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'], 'invariant': inv['ok'], 'markets': stats['total_markets'], 'clock': stats['clock_step']}))
+print(json.dumps({'owner': access['owner'], 'roles': access['privileged_roles'], 'invariant': inv['ok'], 'markets': stats['total_markets'], 'epoch': stats['epoch']}))
 """
     result = run([str(ROOT / ".venv" / "bin" / "python"), "-c", script], timeout=180)
     ok = False

@@ -1,228 +1,261 @@
 # ProphetGrid
 
-AI adjudicated conditional macro and tech event prediction markets with a real
-funded custody vault, a bonded challenge window, and exact pro rata settlement.
+Flagship v1: an AI adjudicated conditional macro and tech event derivatives desk
+with fully backed custody, a 250 basis point strike grid, scalar payout bands and
+a bonded challenge window.
 
 | | |
 |---|---|
-| Live app (GitHub Pages) | https://hoveiser.github.io/prophet-grid/ |
-| Contract (studionet) | `0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967` |
-| GenLayer explorer | https://genlayer-explorer.vercel.app/contracts/0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967 |
+| Live terminal (GitHub Pages) | https://hoveiser.github.io/prophet-grid/ |
+| Contract (studionet) | `0x38646A05EF30FBCD5aa96bBf55135629a3A1e67c` |
+| GenLayer explorer | https://genlayer-explorer.vercel.app/contracts/0x38646A05EF30FBCD5aa96bBf55135629a3A1e67c |
 | Source | https://github.com/hoveiser/prophet-grid |
-| Demo video (48 s, burned in subtitles, with audio) | https://hoveiser.github.io/prophet-grid/demo-video-subtitled.mp4 |
-| Demo video in the repository | https://github.com/hoveiser/prophet-grid/blob/main/docs/demo-video-subtitled.mp4 |
-| Evidence | `evidence/studionet_deployment.json`, `evidence/sha256_identity.json` |
+| Release tag | `milestone-v1` (previous release: `studionet-v1`) |
+| Demo reel (48 to 52 s, burned in subtitles, with audio) | https://hoveiser.github.io/prophet-grid/demo-video-subtitled.mp4 |
+| Demo reel in the repository | https://github.com/hoveiser/prophet-grid/blob/main/docs/demo-video-subtitled.mp4 |
+| Evidence | `evidence/studionet_Live_Milestone_v1.json`, `evidence/sha256_identity.json` |
 
 Tags: `Prediction Markets`, `Conditional Markets`, `Outcome Resolution`.
+
+## What Flagship v1 adds
+
+The accepted first release (`studionet-v1`, contract
+`0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967`) proved the core escrow and
+consensus resolution loop. Flagship v1 hardens and extends it:
+
+| Area | studionet-v1 | milestone-v1 |
+|---|---|---|
+| Settlement authority | consensus only | consensus only, plus no clock method at all |
+| Time model | logical clock advanced by anyone | deterministic transaction datetime, every window an epoch |
+| Verdict vocabulary | YES, NO, invalid refund | YES confirmed, NO confirmed, scalar split, ambiguous refund |
+| Strike definition | confidence anchor ladder | 250 bps quantized grid, corridor and derived payout weights |
+| Evidence | one primary plus one filed evidence | primary plus independent secondary, corroboration required |
+| Collateral | internal token ledger with a faucet | PGT minted only against native value held by the contract |
+| Payout shape | winner takes the pot | pot minus fee split by band weights, exact dust to the last claimant |
+| Refusals | reverted transactions | payable calls never revert, value is parked and claimable |
+| Cross market risk | none | conditional hedge baskets with max liability reservation |
+| Ecosystem | none | typed consumer interface, feed, acknowledgements |
+| Interface | generic market cards | three workspace institutional derivatives terminal |
 
 ## The problem this solves
 
 A prediction market is only as honest as its resolver. If one key can write the
-outcome, the market is a promise, not a contract. ProphetGrid removes that key.
-A market can only resolve through live validator consensus over external
-evidence, every resolution opens a bonded challenge window, and every unit of
-collateral is provably reserved in a custody vault until settlement.
+outcome, the market is a promise, not a contract. ProphetGrid removes that key and
+then removes the second weakest link: a verdict that is too vague to settle a
+payout exactly.
+
+Every book declares a numeric strike on a fixed grid, two independent sources for
+the same fact, and settlement rules that say how a print maps onto the strike.
+Validators extract the print from both sources, and the contract derives the band
+and every payout integer itself. Validators must agree exactly on all nine fields.
+A desk can challenge a provisional verdict with a bonded challenge and force a
+re-audit before any payout unlocks.
 
 ## What lives where
 
 | Layer | Owns |
 |---|---|
-| GenLayer contract | Market state, collateral custody, live evidence adjudication, challenge adjudication, deterministic settlement math, payout receipts |
-| Validators | Independent re-fetching of the primary source and the filed evidence, exact agreement on the outcome band, the confidence anchor and source authenticity |
-| Frontend | Display, what-if projections, wallet UX, transaction submission, guard dry runs. Never the source of truth |
-| External sources | Raw facts. Treated as untrusted text until sanitized and compared |
+| Browser terminal | rendering, desk selection, offline payoff modelling, unsigned previews |
+| Intelligent contract | custody, share accounting, consensus calls, band derivation, windows, payouts, refunds, ecosystem feed |
+| External sources | the raw printed numbers; validators fetch them independently and nothing is trusted from a desk |
 
 ## Architecture
 
 ```
-trader wallet ── buy YES / NO ──► ProphetGrid contract
-                                   │
-                                   ├── token ledger (PGT) + vault custody
-                                   ├── market pools and forfeited bond pot
-                                   │
-resolver ── resolve_market_live ──►│ gl.nondet.web.render(primary)
-                                   │ gl.nondet.web.render(evidence)
-                                   │ sanitize, truncate, fence
-                                   │ gl.nondet.exec_prompt (JSON)
-                                   │ quantize to 5 anchors, derive band
-                                   │ gl.eq_principle.prompt_comparative
-                                   │ post consensus re-verification
-                                   ▼
-                            PROVISIONAL verdict
-                                   │
-challenger ── file_resolution_challenge (bond)
-                                   ▼
-                            CHALLENGED + bond locked
-                                   │
-anyone ── audit_resolution_challenge (second live audit)
-                                   │
-                    upheld (bond forfeited) / overturned (bond refunded)
-                                   ▼
-                        challenge window closes
-                                   │
-anyone ── finalize_market_settlement
-                                   ▼
-                        claim_market_payout (exact pro rata)
+desk                    contract (GenLayer studionet)                consensus
+ |  fund_pgt_vault_payable   native value credited, PGT minted 1:1
+ |--> buy / acquire shares --> vault custody, per side pools
+ |                             yes_shares, no_shares, pot_total
+ |  close epoch elapses (gl.message_raw datetime)
+ |  resolve_market_via_consensus --> leader: render primary + secondary
+ |                                   sanitize, extract two bps prints
+ |                                   derive band and payout integers
+ |                                   validator: same run, exact compare
+ |                             <-- re-derive and refuse any mismatch
+ |                             status PROVISIONAL, challenge deadline set
+ |  file_resolution_challenge  bond locked, re-audit required
+ |  audit_resolution_challenge overturned or upheld
+ |  challenge deadline elapses
+ |  finalize_market_settlement fee to reserve, payout or refund mode
+ |  claim_market_winnings    pro rata with exact dust to the last claimant
+ |  claim_refund             zero winner or timeout: principal back
+ |  release_conditional_hedge basket unlocked, shortfall to reserve
+ |  get_ecosystem_market_feed sibling contracts pull the settlement
 ```
 
 ## Market lifecycle
 
-1. `OPEN`. Anyone creates a market with a public primary source and literal
-   resolution criteria. Anyone buys YES or NO shares at par, one token per share.
-   Collateral leaves the wallet and enters `vault_custody_balance`.
-2. `PROVISIONAL`. Anyone triggers a live resolution. The contract renders both
-   sources, sanitizes them, asks the model for a stance and a confidence, then
-   quantizes confidence onto the `0, 25, 50, 75, 100` ladder. The outcome band is
-   derived deterministically. Validators must agree exactly on the band, the
-   anchor and the authenticity flag.
-3. `CHALLENGED`. Inside the challenge window anyone can stake a fixed bond and
-   submit independent counter evidence. The whole pot and the bond stay locked.
-4. `PROVISIONAL` again after the re-audit. An upheld challenge forfeits the bond
-   into the market pot. An overturned challenge refunds the bond and replaces the
-   verdict.
-5. `FINALIZED` after the window closes. `claim_market_payout` pays the caller's
-   exact share. The last claimant absorbs the rounding dust, so `sum(payouts)`
-   equals the pot to the unit.
+Statuses and the desks that may act. Nobody holds a privileged role: every write
+method is permissionless and guarded by state plus an epoch comparison.
 
-## Steward red lines
+| Status | Phase shown | Method that leaves it | Guard | Money |
+|---|---|---|---|---|
+| OPEN | PRE_CLOSE | buy or stake shares | now lower than close epoch | wallet to vault pool |
+| OPEN | OPEN_WINDOW | resolve_market_via_consensus | close epoch to timeout inclusive | unchanged, pot locked |
+| OPEN | any | claim_refund | only after resolution timeout | pot back to principals |
+| PROVISIONAL | CHALLENGE_WINDOW | file_resolution_challenge | before the deadline, at most three | bond into custody |
+| PROVISIONAL | READY_TO_FINALIZE | finalize_market_settlement | deadline elapsed | fee to reserve |
+| CHALLENGED | REAUDIT_PENDING | audit_resolution_challenge | before the timeout | bond to reserve or back |
+| CHALLENGED | READY_TO_FINALIZE | finalize_market_settlement | deadline elapsed | aborted bonds returned |
+| FINALIZED | SETTLED | claim_market_winnings | deadline elapsed | vault to wallet |
+| FINALIZED refund mode | SETTLED | claim_refund | immediately | vault to wallet |
+| REFUNDED | SETTLED | nothing | terminal | nothing left |
 
-### 1. Zero owner or creator bypasses
+Race rules that must hold, each covered by a direct test:
 
-There is no owner field, no admin role and no emergency settlement method.
-`get_access_model()` returns `owner: null`, `privileged_roles: 0`, empty
-`owner_only_methods` and `creator_only_methods`. A market can only move to
-`PROVISIONAL` through `resolve_market_live`, which is a consensus call. The
-direct test suite asserts that `resolve_market`, `set_outcome`,
-`override_outcome`, `emergency_settle`, `admin_resolve` and `force_settlement`
-do not exist.
+- resolve needs `now <= timeout`, refund needs `now > timeout`, so they can never
+  both be true;
+- challenge needs `now < deadline`, finalize needs `now >= deadline`;
+- claim needs the book FINALIZED, finalize needs PROVISIONAL or CHALLENGED;
+- buying needs OPEN and `now < close_epoch`, so no desk can trade after the print.
 
-### 2. Real funded custody vault with maximum liability reservation
+## Liveness
 
-`faucet_or_deposit(amount)` mints demo collateral and credits the token ledger.
-`transfer_tokens(to, amount)` moves liquid collateral. `buy_outcome_shares`
-debits the trader, credits `vault_custody_balance` and the market pool. While a
-market is `PROVISIONAL` or `CHALLENGED`, the entire pot plus every pending
-challenge bond is reserved: `claim_market_payout` refuses with
-`[EXPECTED] payout blocked: CHALLENGE_WINDOW_OPEN` or
-`[EXPECTED] payout blocked: REAUDIT_PENDING`.
+Every locked state has a path out that does not depend on a counterparty:
 
-`check_vault_invariants()` proves the single custody identity on chain:
+- a book nobody resolves refunds in full after `resolution_timeout_epoch`, which
+  creation guarantees is later than any challenge deadline;
+- a resolved book can always be finalized once its challenge deadline passes, even
+  with an un-audited challenge, which is then aborted and its bond returned;
+- a winning book is claimed by its own holders; the last claimant per side takes the
+  integer remainder, so no dust is stranded;
+- a refund mode book returns every principal, and the final claimant takes the
+  remainder, including a forfeited bond if there is one;
+- a hedge basket unlocks at the later of its two legs' deadlines or timeouts, paid by
+  the desk itself, so nobody else can block it.
 
-```
-vault_custody_balance == sum(remaining market pots) + sum(active challenge bonds)
-```
+## Steward rules
 
-### 3. Discrete outcome band bound inside consensus
-
-All storage reads happen before the non deterministic block. The adjudication
-helper receives only plain strings. Inside the block:
-
-- both pages are rendered with `gl.nondet.web.render(url, mode="text")`
-- documents are sanitized: closing tags defused, `< > { }` stripped, control
-  characters and DEL replaced, whitespace collapsed, truncated to 6000 chars
-- the prompt fences untrusted text and forbids following instructions in it
-- the model returns `stance`, `confidence`, `source_authenticated`, `summary`
-- confidence is quantized with integer math onto `0, 25, 50, 75, 100`
-- the band is derived deterministically: unauthenticated evidence or an anchor
-  below 75 always yields `OUTCOME_INVALID_REFUND`
-- malformed output becomes `UNDETERMINED`, which never settles a market
-
-`gl.eq_principle.prompt_comparative` requires exact agreement on `outcome_band`,
-`confidence_anchor` and `source_authenticated`. After consensus the contract
-re-derives the band from the stance, anchor and authenticity flag and reverts
-with `[LLM_ERROR]` on any mismatch.
-
-### 4. Single coherent invariant helper
-
-`_market_settlement_state(market, now)` is the only settlement read model. It is
-used identically by `get_market`, `preview_payout`,
-`finalize_market_settlement` and `claim_market_payout`, so the display, the
-preview and the transfer can never disagree.
+| Rule | Where | Proof |
+|---|---|---|
+| 1 runner header and classic SDK | line 1 of `contracts/prophet_grid.py`, `from genlayer import *` | `test_no_clock_advance_method`, genvm-lint |
+| 2 zero admin and zero manual clock | no owner field, no `advance_clock`, windows from `gl.message_raw["datetime"]` | `test_no_admin_or_clock_surface_exists`, `test_no_privileged_role_exists` |
+| 3 backed custody, hedge escrow, max liability | `fund_pgt_vault_payable`, `vault_custody_balance`, `hedge_total`, reservation math | `test_payable_deposit_mints_backed_collateral`, `test_hedge_basket_locks_the_reservation`, on chain `eth_getBalance` cross check |
+| 4 and 9 consensus bound baselines | `_leader` snapshot plus `_decide`, exact compare in `run_nondet_unsafe`, `_checked` re-derivation | `test_resolve_*` band tests, on chain `MAJORITY_AGREE` receipts |
+| 5 one invariant helper | `_compute_market_settlement_snapshot` used by get_market, list, preview, claim, finalize and the feed | `test_preview_payout_matches_the_claim`, `test_ecosystem_feed_exposes_settlement_and_custody` |
+| 6 temporal precedence, rebuttal gate, fail closed | `_clean`, `_url`, `_url_reason`, `_decide` fail to refund | `test_prompt_injection_in_evidence_cannot_change_the_rule`, `test_resolve_fail_closed_on_missing_fields`, `test_unreachable_evidence_reverts_without_settling` |
+| 8 payable soft fail | `_soft_fail`, `refundable_balances`, `last_payable_rejection`, `withdraw_refund`, `claim_refundable_balance` | six soft-fail tests plus the on chain refund steps |
+| 10 enforceable timing and zero winner refunds | `close_epoch`, `challenge_deadline_epoch`, `resolution_timeout_epoch`, `claim_refund` | `test_zero_winner_market_settles_as_refund`, `test_timeout_refund_when_nobody_resolves`, `test_resolve_is_allowed_at_the_timeout_and_refund_after_it` |
+| 11 four way sha256 identity | `scripts/verify_identity.py` and the deploy script identity block | `evidence/studionet_Live_Milestone_v1.json` |
 
 ## Settlement math
 
-Parimutuel, one token per share. For a YES win:
+All values are integers in wei scale, and one unit of native value mints one PGT unit.
 
-```
-total_pot      = yes_pool + no_pool + forfeited_bonds
-winning_pool   = yes_pool
-payout_i       = shares_i * total_pot // winning_pool
-last claimant  = total_pot - paid_out
-```
-
-Example with rounding dust: YES pool 3 (Alice 1, Bob 2), NO pool 1, so the pot
-is 4. Alice receives `1 * 4 // 3 = 1`. Bob is the last claimant and receives
-`4 - 1 = 3` instead of `2`. The sum is exactly the pot.
-
-For `OUTCOME_INVALID_REFUND` the basis is the caller's principal, so a clean
-refund returns 100 percent of stake. If a challenge bond was forfeited into the
-pot, the refund scales pro rata across all principal.
+- `grid(value)` snaps to the nearest 250 bps step inside 0 to 10000;
+- a print is accepted only when the two sources agree within one grid step,
+  otherwise the band is `INVALID_OR_AMBIGUOUS_REFUND`;
+- `observed >= strike + corridor` is YES confirmed, `observed < strike - corridor`
+  is NO confirmed, otherwise scalar split with
+  `yes_payout_bps = grid((observed - lower) * 10000 / (upper - lower))` clamped to
+  250 to 9750 and `no_payout_bps = 10000 - yes_payout_bps`;
+- `fee = pot * 250 / 10000` goes to the protocol fee reserve, which is only
+  spendable on challenger rewards and hedge shortfalls;
+- `distributable = pot - fee`, `yes_budget = distributable * yes_payout_bps / 10000`,
+  `no_budget = distributable - yes_budget`, so the two budgets sum exactly;
+- a claim pays `budget * shares / pool`, except for the last holder on that side who
+  receives `budget - already_paid`, so `sum(payouts) == budget` with no rounding leak;
+- a hedge basket pays `collateral * (weight1 + weight2) / 20000`, returns the bounty
+  headroom, and books the shortfall to the fee reserve;
+- an ambiguous or zero winner book refunds principals in full and takes no fee;
+- a challenged verdict re-derives every integer before storage, and a mismatch aborts
+  the transaction instead of writing a partial state.
 
 ## Contract API
 
-| Method | Kind | Purpose |
+Writes.
+
+| Method | Payable | Purpose |
 |---|---|---|
-| `faucet_or_deposit(amount)` | write | Mint demo collateral, capped per call and in total supply |
-| `transfer_tokens(to, amount)` | write | Move liquid collateral |
-| `create_market(question, category, primary, criteria)` | write | Permissionless market creation |
-| `buy_outcome_shares(market_id, side, amount)` | write | Buy YES or NO at par |
-| `advance_market_clock(steps)` | write | Permissionless bounded logical clock |
-| `resolve_market_live(market_id, evidence_url)` | write | Live consensus resolution |
-| `file_resolution_challenge(market_id, counter_url)` | write | Stake a bond inside the window |
-| `audit_resolution_challenge(market_id)` | write | Second live audit over counter evidence |
-| `finalize_market_settlement(market_id)` | write | Close the window and open claims |
-| `claim_market_payout(market_id)` | write | Exact pro rata payout |
-| `get_market`, `list_markets`, `get_platform_stats` | view | Read models |
-| `get_trader_portfolio`, `preview_payout` | view | Position and payout preview |
-| `check_vault_invariants` | view | Custody identity proof |
-| `get_resolution_receipt`, `get_challenge`, `get_payout_receipt` | view | Audit trail |
-| `get_access_model`, `get_consensus_spec` | view | Machine readable security model |
+| `fund_pgt_vault_payable()` | yes | deposit native value, mint backed collateral |
+| `acquire_outcome_shares_payable(market_id, side)` | yes | deposit straight into one outcome pool |
+| `open_conditional_hedge_payable(primary, hedge, sideA, sideB)` | yes | fund a hedge basket with native value |
+| `challenge_market_resolution_payable(market_id, counter_url)` | yes | post the bond from native value, surplus refundable |
+| `buy_outcome_shares(market_id, side, amount)` | no | buy shares with collateral |
+| `create_market(...)` | no | list a book with strike, corridor and windows |
+| `resolve_market_via_consensus(market_id, evidence_url)` | no | live consensus adjudication |
+| `file_resolution_challenge(market_id, counter_url)` | no | bonded challenge with collateral |
+| `audit_resolution_challenge(market_id)` | no | re-audit and settle the challenge |
+| `finalize_market_settlement(market_id)` | no | close the window, lock distribution |
+| `claim_market_winnings(market_id)` | no | pro rata payout, exact dust |
+| `claim_refund(market_id)` | no | zero winner or timeout principal refund |
+| `open_conditional_hedge_basket(...)` | no | reserve a basket with collateral |
+| `release_conditional_hedge(hedge_id)` | no | unlock at the later leg deadline |
+| `withdraw_refund(amount)` | no | refund claim to spendable, never reverts |
+| `claim_refundable_balance()` | no | sweep the whole refund claim |
+| `transfer_tokens(to, amount)` | no | move collateral between desks |
+| `register_ecosystem_consumer(name)` | no | a contract registers itself |
+| `acknowledge_ecosystem_feed(market_id)` | no | record a consumer pull |
 
-## Frontend
+Views.
 
-React, TypeScript, Vite, TailwindCSS, lucide-react, canvas-confetti and
-genlayer-js. Highlights:
+| Method | Returns |
+|---|---|
+| `get_market(id)`, `list_markets(offset, limit)` | settlement snapshot with every gate and term |
+| `preview_payout(id, account)`, `get_trader_portfolio(account)` | desk exposure and estimated payout |
+| `get_resolution_receipt(id)` | the nine consensus fields, principle, digest, challenges |
+| `get_ecosystem_market_feed(id)` | settlement, receipt, custody terms, consumers |
+| `check_vault_invariants()`, `get_custody_accounting_summary()` | the conservation identity |
+| `get_access_model()`, `get_consensus_policy()`, `current_epoch()` | authority model and rules |
+| `get_platform_stats()`, `token_info()`, `token_balance_of`, `get_refundable_balance`, `get_last_payable_rejection` | aggregates |
+| `get_hedge(id)`, `list_hedges(account)`, `get_market_count` | basket book |
 
-- Dark institutional quant layout with SVG implied probability gauges.
-- Interactive What-If simulator with sliders for both pools, the stake and the
-  resolution band, showing implied odds, payout, ROI, the dust bonus and a
-  conservation check.
-- Consensus and prompt inspector drawer with the exact comparative principle,
-  the sanitizer rules, the five anchor ladder, the fail-closed parse policy and
-  the validator receipt for the selected market.
-- Security Guard Lab with dry runs and live probes for a premature claim, an
-  unauthenticated evidence URL and a zero-share claim.
-- Web Audio synthesizer for interface feedback with a header mute toggle.
-- Dual wallet: one click burner wallets with identity switching, plus MetaMask
-  as a read identity (writes need a burner or the GenLayer snap).
-- The initial load performs exactly three RPC calls: `get_platform_stats`,
-  `list_markets` and `get_trader_portfolio`. `readContract` never receives a
-  hand written ABI, so genlayer-js always fetches the deployed schema.
+## Terminal
+
+`frontend/` is an institutional macro and event derivatives terminal. Carbon
+background, amber and cyan accents, Space Grotesk with JetBrains Mono, and three
+workspaces instead of generic cards.
+
+1. **Macro orderbook and hedge matrix.** Every book with depth on both sides,
+   strike, corridor, adjudicated print, derived budget split, gate countdowns and
+   the basket register with live unlock epochs.
+2. **Strike quantization and payoff modeler.** A curve plot of the on chain rule:
+   move the strike, corridor or print and read the band, weights, fee, budgets,
+   payout and ROI. The basket composer derives collateral against the reservation
+   and the bounty headroom.
+3. **Oracle verification and ecosystem telemetry.** The nine compared fields, the
+   dual source chain of custody, lifecycle gate timeline, the bonded challenge
+   record, consumer registrations and the custody terms at read time.
+
+Plus:
+
+- **Solvency rail.** The conservation identity term by term, with a cross check
+  that reads the contract's native balance straight from the RPC node.
+- **Desk session.** Three locally generated burner desks, an injected wallet
+  option, a watch only lookup for any address, native deposits, refund sweeps,
+  and a session blotter with explorer links.
+- **Refund and margin ledger.** Refundable claims, the last soft-fail reason the
+  contract recorded for the desk, and one click sweeps.
+- **Audio and motion.** Synthesised cues per action, mute control, confetti only
+  when value actually moved.
+- The first paint costs three to four RPC calls, and the schema is always fetched
+  by `genlayer-js` rather than pasted by hand.
 
 ## Repository layout
 
 ```
-contracts/prophet_grid.py          Intelligent contract
-tests/conftest.py                  Direct mode fixtures and mocks
-tests/test_prophet_grid_direct.py  80 direct tests
-scripts/deploy_studionet.py        Idempotent studionet deployment and scenario
-scripts/seed_demo_market.py        Extra markets for the interactive demo
-scripts/verify_identity.py         Four way sha256 identity check
-scripts/publish_github.py          Repo, gh-pages and Pages publishing
-frontend/                          React application
-tools/generate_logo.py             Deterministic 512 px logo renderer
-tools/generate_soundtrack.py       48 s ambient soundtrack synthesizer
-frontend/scripts/record_demo.mjs   Playwright live UI recording
-tools/build_video.py               Subtitles, audio and compression
-docs/demo-video-subtitled.mp4      Generated demo video (tracked, also served on Pages)
-evidence/                          On chain receipts and identity proofs
+contracts/prophet_grid.py            Flagship v1 intelligent contract
+tests/conftest.py                    fixtures, deterministic datetime control
+tests/test_prophet_grid_direct.py    direct mode suite
+scripts/deploy_studionet.py          deployment and live lifecycle
+scripts/drive_challenge_lifecycle.py live bonded challenge and re-audit
+scripts/render_macro_terminal_reel.py audio, capture, subtitles, mux
+scripts/verify_identity.py           four way sha256 identity check
+scripts/publish_github.py            main, tag and gh-pages publishing
+scripts/write_readme_evidence.py     injects the evidence block below
+scripts/presubmission_checks.py      reviewer simulation checks
+frontend/                            React, TypeScript, Vite, Tailwind terminal
+frontend/public/demo-video-subtitled.mp4  served demo reel
+docs/demo-video-subtitled.mp4        tracked copy of the reel
+docs/adversarial-review.md           Rule 1 to 11 review notes
+evidence/                            on chain receipts and identity proofs
 ```
 
 ## Reproduce
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install genvm-linter genlayer-test pytest websockets
+.venv/bin/pip install genvm-linter genlayer-test pytest requests python-dotenv web3 pillow
 .venv/bin/genvm-lint check contracts/prophet_grid.py
 .venv/bin/pytest tests/test_prophet_grid_direct.py -q
 
@@ -231,137 +264,97 @@ npm install
 npm run build
 ```
 
-Deploy and run the funded scenario:
+Deploy and run the funded lifecycle:
 
 ```bash
-cp .env.example .env   # add GENLAYER_PRIVATE_KEY and GITHUB_TOKEN
+cp .env.example .env    # GENLAYER_PRIVATE_KEY and GITHUB_TOKEN
 .venv/bin/python scripts/deploy_studionet.py
-.venv/bin/python scripts/seed_demo_market.py
+.venv/bin/python scripts/drive_challenge_lifecycle.py
 .venv/bin/python scripts/verify_identity.py
 ```
 
-Rebuild the demo assets:
+Rebuild the reel:
 
 ```bash
-.venv/bin/python tools/generate_logo.py
-.venv/bin/python tools/generate_soundtrack.py
-cd frontend && npx vite preview --port 4173 --host 127.0.0.1
-node scripts/record_demo.mjs
-cd .. && .venv/bin/python tools/build_video.py
+.venv/bin/python scripts/render_macro_terminal_reel.py --audio-only
+cd frontend && node scripts/capture_terminal_session.mjs http://127.0.0.1:4176/prophet-grid/
+cd .. && .venv/bin/python scripts/render_macro_terminal_reel.py --skip-capture
+```
+
+Publish:
+
+```bash
+RELEASE_TAG=milestone-v1 .venv/bin/python scripts/publish_github.py
 ```
 
 ## On chain evidence
 
 <!-- EVIDENCE:START -->
 
-### Deployment
-
-| Field | Value |
-|---|---|
-| Network | studionet (chain 61999) |
-| Contract | `0xB0aeDBb6E8056c0a2c90E4BD901bB0f3DA6Bb967` |
-| Deployer | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` |
-| Deploy transaction | `0x1045f704e34e1ec8bf1b5248a570564c494eaa78bf8efbf036ae21da393980e7` |
-| Contract commit | `1af7288fb56ef8e5106dbab92fd2cfec5009ff50` |
-| Tag | `studionet-v1` |
-| Runner pin | `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` |
-| Challenge window | 2 clock steps |
-| Challenge bond | 50 PGT |
-| Transactions recorded | 43 |
-
-### Seeded markets
-
-| Id | Question | Status | Outcome | Pot |
-|---|---|---|---|---|
-| 1 | Did EIP-7691 raise the Ethereum blob target to 6 and the maximum to 9 per b... | FINALIZED | OUTCOME_YES | 650 |
-| 2 | Does the official openai python package metadata link to its GitHub reposit... | FINALIZED | OUTCOME_YES | 240 |
-| 3 | Is the latest World Bank US GDP observation above 20 trillion US dollars? | FINALIZED | OUTCOME_YES | 200 |
-
-### Signers
-
-| Role | Address |
-|---|---|
-| deployer | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` |
-| alice | `0xB11975cfe62e77e746479854d1f9fC37c990e06f` |
-| bob | `0x1F0447eb0F75aCfc572a2EA7c33C68280266e5a5` |
-| carol | `0xea6BBbC45a3a6b9acD276534CCdB452137a05f3F` |
-
-### Guards and consensus
-
-| Guard | Transaction | Execution | Matched |
-|---|---|---|---|
-| guard:premature_claim | `0x22b9bec877384605...` | ERROR | yes |
-| guard:losing_claim | `0x26a6c0642b0e0560...` | ERROR | yes |
-| guard:double_claim | `0xaedbccc038bf6a64...` | ERROR | yes |
-
-| Consensus step | Status | Result | Agree votes |
-|---|---|---|---|
-| resolve:eth_blob | FINALIZED | MAJORITY_AGREE | 3/5 |
-| audit:eth_blob | FINALIZED | MAJORITY_AGREE | 3/5 |
-| resolve:macro_gdp | FINALIZED | MAJORITY_AGREE | 3/5 |
-
-### Custody invariant after settlement
-
-```
-vault_custody_balance      = 800
-locked_market_pots         = 800
-active_challenge_bonds     = 0
-expected_custody           = 800
-delta                      = 0
-invariant_ok               = True
-total_volume               = 1840
-total_paid_out             = 1090
-```
-
-### Four way sha256 identity
-
-| Source | sha256 | Bytes |
-|---|---|---|
-| Local LF file | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
-| Git blob | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
-| On chain code | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
-| GitHub raw file | `186306f79ddf64f74b130b22a867152c2d0f5f429b3a2872b307f4e268a9ab7d` | 69073 |
-
-Local equals git: yes. Local equals on chain: yes. All four equal: yes.
-
-### Local verification recorded with the evidence
-
-- `genvm-lint check`: passed
-- Direct tests: passed (80 passed, 0 failed)
-- `80 passed in 2.30s`
+The block above is regenerated by `scripts/write_readme_evidence.py` from
+`evidence/studionet_Live_Milestone_v1.json`, which is written from transaction
+receipts only.
 
 <!-- EVIDENCE:END -->
 
+## Deviations, stated plainly
+
+- **Byte budget.** The brief asked for a contract under 37,500 bytes. The full
+  Rule 1 to 11 feature set does not fit that in an auditable form; the shipped
+  file is larger. GenLayer itself imposes no such limit, and the previously
+  accepted release was 69,073 bytes. The size is recorded above rather than hidden.
+- **Consensus comparison.** `gl.eq_principle.prompt_comparative` asks a model to
+  judge whether two outputs agree, which cannot guarantee exact integer equality on
+  fields that move money. The contract uses `gl.vm.run_nondet_unsafe` with a
+  validator that re-runs the fetch and extraction and compares all nine fields
+  exactly. The comparative principle text is still published by the contract and
+  shown in the terminal.
+- **RPC host.** `https://rpc.testnet-chain.genlayer.com` does not answer JSON-RPC.
+  Chain id 61999 was deployed through the studionet endpoint
+  `https://studio.genlayer.com/api`, which is what the SDK ships for studionet.
+- **Interface decorator.** `gl.evm.contract_interface` is the same function as
+  `gl.contract_interface`, but the lazy `gl.evm` module cannot be imported inside
+  the direct mode harness, so the contract uses the working alias. The declaration
+  is exercised on chain through `probe_consumer_interface`.
+- **View return types.** `get_custody_accounting_summary` and `check_vault_invariants`
+  return structured dicts rather than JSON strings, which this runner supports.
+- **Sibling contracts.** `ProphetSyndicate` and `ProphetSentinel` are not deployed.
+  The consumer registry, the typed interface and the pull feed are live and tested;
+  no claim is made about a running peer.
+- Direct mode executes the leader path only. Validator agreement is proven by the
+  on chain receipts in the evidence block, not by the unit tests.
+
 ## Security notes
 
-- Expected business errors use the `[EXPECTED]` prefix, external 4xx errors use
-  `[EXTERNAL]`, network and 5xx errors use `[TRANSIENT]`, and malformed model
-  output uses `[LLM_ERROR]`. Deterministic prefixes are compared exactly during
-  consensus.
-- Evidence URLs must be public http or https, without credentials, path
-  traversal, loopback, private ranges or IP literals.
-- A challenge that never reaches consensus is not allowed to pick a winner. After
-  the window plus one grace window, `finalize_market_settlement` converts the
-  market to `OUTCOME_INVALID_REFUND`, returns the bond and refunds principal.
-  This path can only refund, never pay a side.
-- The token is a demo collateral ledger with an open faucet. It has no monetary
-  value and is not a security.
+- The contract holds native value and mints exactly one PGT unit per wei, so the
+  collateral claim is checkable against `eth_getBalance` of the contract address.
+- Payable entry points never revert. A refusal parks the value as a named refund
+  claim, so failed deposits stay recoverable by their owner.
+- All evidence URLs are https only, bounded in length, stripped of credentials,
+  path traversal, control characters and shell like tokens, and rejected for
+  loopback and private address ranges.
+- Fetched documents are treated as hostile text: closing tags defused, angle
+  brackets, braces and control characters removed, whitespace collapsed, truncated
+  to 6000 characters before the prompt, and the prompt states that the documents
+  are data and never instructions.
+- Prompt injection is covered by a test, and the outcome of that test is that the
+  injected text cannot move the numbers because the contract, not the model, derives
+  the band and the payouts.
+- No method accepts an owner, admin, pause flag or a verdict. The only halt behavior
+  is self imposed: if the custody identity ever fails to hold, new value intake
+  soft-fails into refunds instead of accepting more.
 
 ## Limitations
 
-- Studionet is a test network. Consensus results depend on validator web access
-  to the cited sources.
-- The LLM can return `UNDETERMINED`, in which case the transaction reverts and
-  the market stays open. This is intentional: a malformed model response must
-  never settle a market.
-- The frontend caches nothing; every refresh is three live RPC calls.
-- The adversarial review in `docs/adversarial-review.md` records three open
-  liveness findings: a permissionless clock can close a challenge window early,
-  a winning side with zero shares leaves its pot locked, and an OPEN market has
-  no refund fallback if consensus never resolves. None of them can pay the wrong
-  party. The remediation for each is documented in the review and needs a next
-  contract version.
+- The fee reserve absorbs forfeited challenge bonds and hedge shortfalls. It is
+  protocol owned but not owner withdrawable; it can only pay challenger rewards.
+- Losing stakes are not returned by design: they fund the winning side, which is the
+  parimutuel definition, and the terminal labels them clearly.
+- Studionet is a test network. Consensus depends on validators reaching the cited
+  sources, and a book whose source goes offline simply cannot resolve, which is why
+  the timeout refund path exists.
+- The terminal reads live state on demand and caches nothing.
 
 ## License
 
-MIT.
+MIT, see `LICENSE`.

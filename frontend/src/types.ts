@@ -1,11 +1,63 @@
-export type OutcomeBand = "OUTCOME_YES" | "OUTCOME_NO" | "OUTCOME_INVALID_REFUND" | "";
-export type MarketStatus = "OPEN" | "PROVISIONAL" | "CHALLENGED" | "FINALIZED";
-export type MarketPhase =
-  | "TRADING"
-  | "CHALLENGE_WINDOW"
-  | "READY_TO_FINALIZE"
-  | "REAUDIT_PENDING"
-  | "SETTLED";
+export type Band =
+  | "YES_CONFIRMED_FINAL"
+  | "NO_CONFIRMED_FINAL"
+  | "CONDITIONAL_SCALAR_SPLIT"
+  | "INVALID_OR_AMBIGUOUS_REFUND"
+  | "";
+
+export interface SettlementSnapshot {
+  market_id: string;
+  question: string;
+  category: string;
+  status: string;
+  phase: string;
+  mode: string;
+  band: Band;
+  primary_url: string;
+  secondary_url: string;
+  evidence_url: string;
+  criteria: string;
+  strike_bps: number;
+  corridor_bps: number;
+  observed_bps: number;
+  yes_payout_bps: number;
+  no_payout_bps: number;
+  yes_pool: number;
+  no_pool: number;
+  pot: number;
+  reserve_fee: number;
+  distributable: number;
+  yes_budget: number;
+  no_budget: number;
+  winning_payout: number;
+  challenger_reward: number;
+  yes_unclaimed: number;
+  no_unclaimed: number;
+  yes_paid: number;
+  no_paid: number;
+  refund_paid: number;
+  remaining_pot: number;
+  created_at: number;
+  close_epoch: number;
+  resolution_epoch: number;
+  challenge_deadline_epoch: number;
+  resolution_timeout_epoch: number;
+  now: number;
+  corroborated: boolean;
+  zero_winners: boolean;
+  refundable: boolean;
+  challenge_count: number;
+  pending_challenge: string;
+  summary: string;
+  digest: string;
+  can_trade: boolean;
+  can_resolve: boolean;
+  can_challenge: boolean;
+  can_audit: boolean;
+  can_finalize: boolean;
+  can_claim: boolean;
+  can_refund: boolean;
+}
 
 export interface PlatformStats {
   token_symbol: string;
@@ -15,153 +67,160 @@ export interface PlatformStats {
   provisional_markets: number;
   challenged_markets: number;
   finalized_markets: number;
+  refunded_markets: number;
   total_volume: number;
-  total_pot_locked: number;
   total_paid_out: number;
+  total_refunded: number;
+  settlement_count: number;
   tvl: number;
   total_supply: number;
-  clock_step: number;
-  challenge_window_steps: number;
-  challenge_bond_amount: number;
-  runner_pin: string;
+  native_custody_wei: number;
+  protocol_reserve: number;
+  epoch: number;
   invariant_ok: boolean;
-  active_challenge_bonds: number;
   privileged_roles: number;
+  grid_step_bps: number;
+  fee_bps: number;
+  reward_bps: number;
+  max_challenges: number;
+  min_challenge_bond_wei: number;
+  hedge_reservations: number;
 }
 
-export interface Market {
-  market_id: number;
-  question: string;
-  category: string;
-  primary_source_url: string;
-  resolution_criteria: string;
-  status: MarketStatus;
-  phase: MarketPhase;
-  yes_pool: number;
-  no_pool: number;
-  forfeit_pot: number;
-  total_pot: number;
-  remaining_liability: number;
-  paid_out: number;
-  provisional_outcome: OutcomeBand;
-  confidence_anchor: number;
-  source_authenticated: boolean;
-  resolution_summary: string;
-  evidence_url: string;
-  evidence_digest: string;
-  resolved_at_step: number;
-  challenge_deadline_step: number;
-  challenge_open: boolean;
-  challenge_count: number;
-  challenge_bond_locked: number;
-  countdown_steps: number;
-  settlement_ready: boolean;
-  claimable_now: boolean;
-  claim_block_reason: string;
-  implied_yes_prob_bps: number;
-  payout_multiple_ppm: number;
-  winning_side: string;
-  winning_pool: number;
-  principal_pool: number;
-  unclaimed_winner_shares: number;
-  unclaimed_refund_principal: number;
-  trade_count: number;
-  created_at_step: number;
-  finalized_at_step: number;
-  clock_step: number;
-}
-
-export interface MarketPage {
-  total: number;
-  offset: number;
-  limit: number;
-  returned: number;
-  clock_step: number;
-  markets: Market[];
-}
-
-export interface Position {
-  market_id: number;
-  question: string;
-  status: MarketStatus;
-  phase: MarketPhase;
-  outcome_band: OutcomeBand;
+export interface PositionRow {
+  market_id: string;
   yes_shares: number;
   no_shares: number;
   principal: number;
-  claimable: boolean;
-  payout_quote: number;
-  claimed: boolean;
-  claim_block_reason: string;
-}
-
-export interface Portfolio {
-  trader: string;
-  balance: number;
-  position_count: number;
-  positions: Position[];
-  clock_step: number;
-}
-
-export interface ChallengeView {
-  index: number;
-  challenger: string;
-  bond: number;
+  estimated_payout: number;
+  refund_amount: number;
+  implied_yes_bps: number;
+  phase: string;
   status: string;
-  filed_at_step: number;
-  reviewed_at_step: number;
-  original_outcome: string;
-  final_outcome: string;
-  counter_evidence_url: string;
+  band: Band;
+  can_claim: boolean;
+}
+
+export interface HedgeRow {
+  hedge_id: string;
+  account: string;
+  primary_market_id: string;
+  hedge_market_id: string;
+  primary_side: "YES" | "NO";
+  hedge_side: "YES" | "NO";
+  collateral: number;
+  reservation: number;
+  state: string;
+  opened_at: number;
+  released_at: number;
+  paid: number;
+  weights_bps: number;
+  unlock_epoch: number;
+  primary_weight_bps: number;
+  hedge_weight_bps: number;
+  digest: string;
+}
+
+export interface DeskBook {
+  account: string;
+  balance_pgt: number;
+  refundable_wei: number;
+  last_rejection: string;
+  positions: PositionRow[];
+  hedges: HedgeRow[];
 }
 
 export interface ResolutionReceipt {
-  market_id: number;
-  question: string;
-  status: MarketStatus;
-  phase: MarketPhase;
-  outcome_band: OutcomeBand;
-  confidence_anchor: number;
-  source_authenticated: boolean;
+  market_id: string;
+  band: Band;
+  quantized_strike_baseline_bps: number;
+  quantized_observed_metric_bps: number;
+  yes_payout_bps: number;
+  no_payout_bps: number;
+  derived_winning_pool_payout: number;
+  derived_challenger_reward: number;
+  derived_protocol_reserve_fee: number;
+  dual_source_corroborated: boolean;
   summary: string;
-  primary_source_url: string;
+  primary_url: string;
+  secondary_url: string;
   evidence_url: string;
-  evidence_digest: string;
-  resolved_at_step: number;
-  challenge_deadline_step: number;
-  challenge_open: boolean;
-  countdown_steps: number;
-  challenges: ChallengeView[];
-  consensus: string;
+  resolution_epoch: number;
+  challenge_deadline_epoch: number;
+  resolution_timeout_epoch: number;
+  digest: string;
   principle: string;
-  sanitizer_rules: string;
-  parse_policy: string;
-  error_taxonomy: string;
-  confidence_anchors: number[];
-  resolve_threshold: number;
-  document_char_limit: number;
-  runner_pin: string;
-  evidence_sources: string[];
-  challenge_window_steps: number;
-  challenge_bond_amount: number;
+  grid_step_bps: number;
+  compared_fields: string[];
+  challenges: Array<{
+    key: string;
+    challenger: string;
+    state: string;
+    bond: number;
+    filed_at: number;
+    decided_at: number;
+    prior_band: string;
+    counter_url: string;
+  }>;
 }
 
-export interface PayoutReceipt {
-  exists: boolean;
-  market_id: number;
-  holder: string;
-  outcome_band?: OutcomeBand;
-  shares?: number;
-  principal?: number;
-  payout?: number;
-  claimed_at_step?: number;
-  digest?: string;
+export interface CustodyReport {
+  vault_custody_balance: number;
+  custody_terms_total: number;
+  locked_market_pots: number;
+  pending_challenge_bonds: number;
+  hedge_reservations: number;
+  protocol_reserve: number;
+  refundable_native: number;
+  wallet_balances: number;
+  total_supply: number;
+  native_custody_balance: number;
+  ok: boolean;
+  rule?: string;
+  token_symbol?: string;
+  soft_fail_count?: number;
 }
 
-export interface TxRecord {
+export interface EcosystemFeed {
+  feed: string;
+  settlement: SettlementSnapshot;
+  receipt: ResolutionReceipt;
+  custody: CustodyReport;
+  consumers: Array<{
+    address: string;
+    name: string;
+    read_count: number;
+    last_market_id: string;
+  }>;
+  hedges_on_market: HedgeRow[];
+}
+
+export interface ConsensusPolicy {
+  principle: string;
+  compared_fields: string[];
+  bands: string[];
+  grid_step_bps: number;
+  fee_bps: number;
+  reward_bps: number;
+  min_window_seconds: number;
+  max_close_window_seconds: number;
+  max_challenge_window_seconds: number;
+  max_timeout_margin_seconds: number;
+  max_challenges_per_market: number;
+  sanitizer: string;
+}
+
+export interface MarketPage {
+  rows: SettlementSnapshot[];
+  total: number;
+  offset: number;
+}
+
+export interface TxBinding {
+  id: number;
+  label: string;
   hash: string;
-  functionName: string;
-  status: "pending" | "accepted" | "error";
-  message?: string;
+  execution: string | null;
+  status: string | null;
   at: number;
 }

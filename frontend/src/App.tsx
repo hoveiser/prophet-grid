@@ -1,668 +1,760 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import confetti from "canvas-confetti";
 import {
-  Activity,
-  ArrowUpRight,
-  BadgeCheck,
-  Building2,
-  Gavel,
-  Layers3,
-  Plus,
-  RefreshCw,
-  ShieldCheck,
-  Sparkles,
-  Wallet,
+  ArrowDownLeft,
+  BookOpenCheck,
+  Github,
+  LayoutGrid,
+  LineChart,
+  Loader,
+  ScanLine,
+  Video,
 } from "lucide-react";
-import { CHAIN_ID, CONTRACT_ADDRESS, EXPLORER_URL, NETWORK_LABEL, REPO_URL, RUNNER_PIN } from "./config";
-import type { Market, PlatformStats, Portfolio, ResolutionReceipt, TxRecord } from "./types";
 import {
-  burnerKey,
+  CHALLENGE_BOND_WEI,
+  CONTRACT_ADDRESS,
+  EXPLORER_URL,
+  MIN_DEPOSIT_WEI,
+  NETWORK_LABEL,
+  REPO_URL,
+} from "./config";
+import type {
+  ConsensusPolicy,
+  CustodyReport,
+  DeskBook,
+  EcosystemFeed,
+  HedgeRow,
+  MarketPage,
+  PlatformStats,
+  PositionRow,
+  ResolutionReceipt,
+  SettlementSnapshot,
+  TxBinding,
+} from "./types";
+import type { Signal } from "./ui/SignalStrip";
+import {
   connectMetaMask,
-  describeError,
-  readJson,
+  deskFromKey,
+  deskSlot,
+  readContract,
+  selectDeskSlot,
+  sendTransaction,
   TxReverted,
-  walletFromKey,
-  watchOnly,
-  writeTx,
-  type GenLayerClient,
+  watchDesk,
+  describeFailure,
+  type TerminalClient,
 } from "./lib/chain";
-import { sound } from "./lib/sound";
-import { formatExact, formatToken, shortAddress, shortHash } from "./lib/format";
-import { Header } from "./components/Header";
-import { MarketCard } from "./components/MarketCard";
-import { MarketDetail } from "./components/MarketDetail";
-import { Simulator } from "./components/Simulator";
-import { ConsensusDrawer } from "./components/ConsensusDrawer";
-import { GuardLab, type GuardKind } from "./components/GuardLab";
-import { WalletPanel } from "./components/WalletPanel";
-import { CreateMarketModal } from "./components/CreateMarketModal";
-import { Toasts, type ToastItem } from "./components/Toasts";
+import { audio } from "./lib/terminalAudio";
+import { pgt, shortDesk } from "./lib/format";
+import { TerminalChrome } from "./ui/TerminalChrome";
+import { OrderbookMatrix } from "./ui/OrderbookMatrix";
+import { LegTicket } from "./ui/LegTicket";
+import { PayoffCurveModeler } from "./ui/PayoffCurveModeler";
+import { OracleTelemetry } from "./ui/OracleTelemetry";
+import { SolvencyBoard } from "./ui/SolvencyBoard";
+import { DeskRegistry } from "./ui/DeskRegistry";
+import { ListingConsole, type Draft } from "./ui/ListingConsole";
+import { SignalStrip } from "./ui/SignalStrip";
 
-type Tab = "market" | "whatif" | "guards" | "wallet";
-type Filter = "ALL" | "OPEN" | "PROVISIONAL" | "FINALIZED";
+type Workspace = "books" | "model" | "telemetry";
 
-const TAB_META: { id: Tab; label: string; icon: typeof Gavel }[] = [
-  { id: "market", label: "Market", icon: Gavel },
-  { id: "whatif", label: "What-If", icon: Sparkles },
-  { id: "guards", label: "Guards", icon: ShieldCheck },
-  { id: "wallet", label: "Wallet", icon: Wallet },
-];
+const UNIT = 10 ** 15;
 
 export default function App() {
-  const [client, setClient] = useState<GenLayerClient | null>(null);
-  const [address, setAddress] = useState<string>("");
-  const [walletKind, setWalletKind] = useState<"burner" | "metamask">("burner");
-  const [slot, setSlot] = useState(0);
+  const [desk, setDesk] = useState(() => deskFromKey(selectDeskSlot(deskSlot())));
+  const [mode, setMode] = useState<"local desk" | "injected wallet" | "watch only">("local desk");
   const [stats, setStats] = useState<PlatformStats | null>(null);
-  const [markets, setMarkets] = useState<Market[]>([]);
-  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [tab, setTab] = useState<Tab>("market");
-  const [filter, setFilter] = useState<Filter>("ALL");
+  const [custody, setCustody] = useState<CustodyReport | null>(null);
+  const [markets, setMarkets] = useState<SettlementSnapshot[]>([]);
+  const [book, setBook] = useState<DeskBook | null>(null);
+  const [positions, setPositions] = useState<PositionRow[]>([]);
+  const [hedges, setHedges] = useState<HedgeRow[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<Workspace>("books");
   const [busy, setBusy] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [txs, setTxs] = useState<TxRecord[]>([]);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const toastSeq = useRef(1);
-  const booted = useRef(false);
+  const [silenced, setSilenced] = useState(false);
+  const [signals, setSignals] = useState<Signal[]>([]);
+  const [transactions, setTransactions] = useState<TxBinding[]>([]);
+  const [deskOpen, setDeskOpen] = useState(false);
+  const [listingOpen, setListingOpen] = useState(false);
+  const [telemetryOpen, setTelemetryOpen] = useState(false);
+  const [policy, setPolicy] = useState<ConsensusPolicy | null>(null);
+  const [booting, setBooting] = useState(true);
+  const [errors, setErrors] = useState<string | null>(null);
+  const sequence = useRef(1);
 
-  const pushToast = useCallback((tone: ToastItem["tone"], title: string, detail?: string) => {
-    const id = toastSeq.current++;
-    setToasts((current) => [...current.slice(-3), { id, tone, title, detail }]);
+  const active = useMemo(
+    () => markets.find((row) => row.market_id === selected) ?? markets[0] ?? null,
+    [markets, selected],
+  );
+
+  const notify = useCallback((tone: Signal["tone"], title: string, detail?: string) => {
+    const item: Signal = { id: sequence.current++, tone, title, detail };
+    setSignals((current) => [...current.slice(-4), item]);
     window.setTimeout(() => {
-      setToasts((current) => current.filter((item) => item.id !== id));
-    }, 6500);
+      setSignals((current) => current.filter((entry) => entry.id !== item.id));
+    }, 9000);
   }, []);
 
+  const loadDeskViews = useCallback(
+    async (client: TerminalClient, address: string) => {
+      const next = await readContract<DeskBook>(client, "get_trader_portfolio", [address]);
+      setBook(next);
+      setPositions(next.positions ?? []);
+      setHedges(next.hedges ?? []);
+    },
+    [],
+  );
+
+  /** Initial paint costs exactly four RPC calls to stay inside the rate limit. */
   const refresh = useCallback(
-    async (activeClient?: GenLayerClient | null, activeAddress?: string) => {
-      const useClient = activeClient ?? client;
-      const useAddress = activeAddress ?? address;
-      if (!useClient || !useAddress) return;
-      setLoading(true);
-      try {
-        const [platformStats, page, trader] = await Promise.all([
-          readJson<PlatformStats>(useClient, "get_platform_stats"),
-          readJson<{ markets: Market[]; total: number }>(useClient, "list_markets", [0, 12]),
-          readJson<Portfolio>(useClient, "get_trader_portfolio", [useAddress]),
-        ]);
-        setStats(platformStats);
-        setMarkets(page.markets);
-        setPortfolio(trader);
-        setSelectedId((current) => {
-          if (current !== null && page.markets.some((market) => market.market_id === current)) return current;
-          const preferred =
-            page.markets.find((market) => market.status === "PROVISIONAL" && market.challenge_open) ??
-            page.markets.find((market) => market.status === "OPEN") ??
-            page.markets[0];
-          return preferred ? preferred.market_id : null;
-        });
-      } catch (cause) {
-        pushToast("error", "studionet read failed", describeError(cause));
-      } finally {
-        setLoading(false);
+    async (client: TerminalClient, address: string, deep = false) => {
+      const [nextStats, page, nextCustody] = await Promise.all([
+        readContract<PlatformStats>(client, "get_platform_stats"),
+        readContract<MarketPage>(client, "list_markets", [0, 8]),
+        readContract<CustodyReport>(client, "get_custody_accounting_summary"),
+      ]);
+      setStats(nextStats);
+      setMarkets(page.rows);
+      setCustody(nextCustody);
+      if (!selected && page.rows.length > 0) setSelected(page.rows[0].market_id);
+      await loadDeskViews(client, address);
+      if (deep && !policy) {
+        setPolicy(await readContract<ConsensusPolicy>(client, "get_consensus_policy"));
       }
     },
-    [client, address, pushToast],
+    [loadDeskViews, policy, selected],
   );
 
   useEffect(() => {
-    if (booted.current) return;
-    booted.current = true;
-    const handle = walletFromKey(burnerKey(0));
-    setClient(handle.client);
-    setAddress(handle.address);
-  }, []);
+    let cancelled = false;
+    setBooting(true);
+    refresh(desk.client, desk.address, true)
+      .catch((error: unknown) => {
+        if (!cancelled) setErrors(describeFailure(error));
+      })
+      .finally(() => {
+        if (!cancelled) setBooting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [desk, refresh]);
 
   useEffect(() => {
-    if (client && address) {
-      void refresh(client, address);
-    }
-  }, [client, address, refresh]);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible" || busy) return;
+      refresh(desk.client, desk.address).catch(() => undefined);
+    }, 45000);
+    return () => window.clearInterval(timer);
+  }, [busy, desk, refresh]);
 
-  const selected = useMemo(
-    () => markets.find((market) => market.market_id === selectedId) ?? null,
-    [markets, selectedId],
-  );
-  const position = useMemo(
-    () => portfolio?.positions.find((item) => item.market_id === selectedId),
-    [portfolio, selectedId],
-  );
+  const logTx = (label: string, outcome: { hash: string; execution: string | null; status: string | null }) => {
+    setTransactions((current) =>
+      [
+        { id: sequence.current++, label, hash: outcome.hash, execution: outcome.execution, status: outcome.status, at: Date.now() },
+        ...current,
+      ].slice(0, 12),
+    );
+  };
 
-  const filtered = useMemo(() => {
-    if (filter === "ALL") return markets;
-    return markets.filter((market) => market.status === filter);
-  }, [markets, filter]);
-
-  const fireConfetti = useCallback(() => {
-    confetti({
-      particleCount: 90,
-      spread: 72,
-      origin: { y: 0.68 },
-      colors: ["#34D399", "#22D3EE", "#FBBF24", "#E6EDF7"],
-      disableForReducedMotion: true,
-    });
-  }, []);
-
-  const switchSlot = useCallback(
-    (index: number) => {
-      sound.click();
-      const handle = walletFromKey(burnerKey(index));
-      setSlot(index);
-      setWalletKind("burner");
-      setClient(handle.client);
-      setAddress(handle.address);
-      setPortfolio(null);
-      pushToast("info", `Burner ${index + 1} connected`, `${shortAddress(handle.address)} signs its own transactions.`);
-    },
-    [pushToast],
-  );
-
-  const handleMetaMask = useCallback(async () => {
-    sound.click();
-    try {
-      const account = await connectMetaMask();
-      setWalletKind("metamask");
-      setAddress(account);
-      setClient(watchOnly(account).client);
-      setPortfolio(null);
-      pushToast("info", "MetaMask connected", `${shortAddress(account)} is a read identity. Burner wallets sign writes.`);
-    } catch (cause) {
-      pushToast("error", "MetaMask unavailable", describeError(cause));
-    }
-  }, [pushToast]);
-
-  const requireSigner = useCallback(() => {
-    if (walletKind !== "burner") {
-      pushToast("info", "Read-only identity", "Switch to a burner wallet to sign studionet transactions.");
-      return false;
-    }
-    return true;
-  }, [walletKind, pushToast]);
-
-  const runWrite = useCallback(
-    async (
-      key: string,
-      functionName: string,
-      action: (activeClient: GenLayerClient) => Promise<{ hash: string }>,
-      options: { confetti?: boolean; successTitle?: string } = {},
-    ) => {
-      if (!client || !requireSigner()) return;
-      setBusy(key);
-      try {
-        const result = await action(client);
-        setTxs((current) => [
-          { hash: result.hash, functionName, status: "accepted", at: Date.now() },
-          ...current,
-        ]);
-        pushToast("success", options.successTitle ?? `${functionName} confirmed`, shortHash(result.hash));
-        sound.success();
-        if (options.confetti) fireConfetti();
-        await refresh(client, address);
-      } catch (cause) {
-        const message = describeError(cause);
-        const hash = cause instanceof TxReverted ? cause.hash : "local";
-        setTxs((current) => [{ hash, functionName, status: "error", message, at: Date.now() }, ...current]);
-        pushToast("error", `${functionName} reverted`, message);
-        sound.error();
-      } finally {
-        setBusy(null);
+  const run = useCallback(
+    async (label: string, functionName: string, args: unknown[], valueWei: bigint = 0n, cheer = false) => {
+      if (!desk.writable) {
+        notify("halt", "desk is read only", "switch to a local desk or connect a wallet to sign");
+        audio.play("reject");
+        return null;
       }
-    },
-    [client, address, refresh, pushToast, fireConfetti, requireSigner],
-  );
-
-  const probeGuard = useCallback(
-    async (kind: GuardKind): Promise<string | null> => {
-      if (!client || !requireSigner()) return null;
-      const provisional = markets.find((market) => market.status === "PROVISIONAL" && market.challenge_open);
-      const finalized = markets.find((market) => market.status === "FINALIZED");
-      const expectation =
-        kind === "premature"
-          ? "[EXPECTED] payout blocked: CHALLENGE_WINDOW_OPEN"
-          : kind === "injection"
-            ? "[EXPECTED] counter evidence url must use http or https"
-            : "[EXPECTED] position has no winning shares";
-      setBusy(`guard:${kind}`);
+      setBusy(label);
       try {
-        if (kind === "injection") {
-          if (!provisional) return null;
-          await writeTx(client, "file_resolution_challenge", [provisional.market_id, "javascript:alert(1)"]);
-        } else if (kind === "premature") {
-          if (!provisional) return null;
-          await writeTx(client, "claim_market_payout", [provisional.market_id]);
-        } else {
-          if (!finalized) return null;
-          await writeTx(client, "claim_market_payout", [finalized.market_id]);
+        const outcome = await sendTransaction(desk.client, functionName, args, valueWei);
+        logTx(label, outcome);
+        audio.play(cheer ? "settle" : outcome.execution === "SUCCESS" ? "fill" : "print");
+        if (cheer) {
+          confetti({ particleCount: 70, spread: 62, origin: { y: 0.4 }, colors: ["#FF9500", "#00E5FF", "#10B981"] });
         }
-        return "[unexpected] the transaction did not revert";
-      } catch (cause) {
-        const detail = describeError(cause);
-        const confirmed = detail.includes("[EXPECTED]") ? detail : `${expectation} | ${detail}`;
-        setTxs((current) => [
-          {
-            hash: cause instanceof TxReverted ? cause.hash : "local",
-            functionName: `guard:${kind}`,
-            status: "error",
-            message: confirmed,
-            at: Date.now(),
-          },
-          ...current,
-        ]);
-        sound.error();
-        return confirmed;
+        notify("ok", `${label} settled on chain`, `tx ${outcome.hash.slice(0, 18)}...`);
+        await refresh(desk.client, desk.address);
+        return outcome;
+      } catch (error) {
+        if (error instanceof TxReverted) {
+          logTx(label, { hash: error.hash, execution: error.execution, status: "REVERTED" });
+          audio.play("reject");
+          notify("halt", `${label} refused by the contract`, error.message);
+        } else {
+          audio.play("reject");
+          notify("halt", `${label} did not land`, describeFailure(error));
+        }
+        return null;
       } finally {
         setBusy(null);
       }
     },
-    [client, markets, requireSigner],
+    [desk, notify, refresh],
   );
 
-  const loadReceipt = useCallback(
-    async (marketId: number): Promise<ResolutionReceipt> => {
-      if (!client) throw new Error("client is not ready");
-      return readJson<ResolutionReceipt>(client, "get_resolution_receipt", [marketId]);
-    },
-    [client],
-  );
+  const onStake = (side: "YES" | "NO", amountWei: bigint, native: boolean) => {
+    audio.play("depth");
+    return native
+      ? run(`take ${side} native leg`, "acquire_outcome_shares_payable", [active?.market_id ?? "0", side], amountWei)
+      : run(`take ${side} leg`, "buy_outcome_shares", [active?.market_id ?? "0", side, amountWei]);
+  };
 
-  const openConsensus = useCallback(() => {
-    if (!selected) {
-      pushToast("info", "Pick a market first", "Select a market card, then open its consensus receipt.");
-      return;
+  const onResolve = (url: string) => run("consensus adjudication", "resolve_market_via_consensus", [active?.market_id ?? "0", url]);
+
+  const onChallenge = (url: string, native: boolean) =>
+    native
+      ? run("bonded challenge", "challenge_market_resolution_payable", [active?.market_id ?? "0", url],
+          BigInt(CHALLENGE_BOND_WEI) * 2n)
+      : run("bonded challenge", "file_resolution_challenge", [active?.market_id ?? "0", url]);
+
+  const onAudit = () => run("re-audit of the print", "audit_resolution_challenge", [active?.market_id ?? "0"]);
+  const onFinalize = () => run("settlement locked", "finalize_market_settlement", [active?.market_id ?? "0"]);
+  const onClaim = () => run("payout withdrawn", "claim_market_winnings", [active?.market_id ?? "0"], 0n, true);
+  const onRefund = () => run("principal refunded", "claim_refund", [active?.market_id ?? "0"], 0n, true);
+  const onSweepRefund = () => run("refundable swept", "claim_refundable_balance", []);
+
+  const onDeposit = (units: number) =>
+    run("native deposit", "fund_pgt_vault_payable", [], BigInt(units) * BigInt(UNIT));
+
+  const onTransfer = (to: string, units: number) =>
+    run("collateral settled", "transfer_tokens", [to, BigInt(units) * BigInt(UNIT)]);
+
+  const onReleaseHedge = (hedge: HedgeRow) =>
+    run(`basket ${hedge.hedge_id} released`, "release_conditional_hedge", [hedge.hedge_id], 0n, true);
+
+  const onCreate = async (draft: Draft) => {
+    const outcome = await run("book listed", "create_market", [
+      draft.question,
+      draft.category,
+      draft.primary,
+      draft.secondary,
+      draft.criteria,
+      draft.strike,
+      draft.corridor,
+      draft.closeWindow,
+      draft.challengeWindow,
+      draft.timeoutMargin,
+    ]);
+    if (outcome) setListingOpen(false);
+  };
+
+  const switchSlot = (index: number) => {
+    const key = selectDeskSlot(index);
+    setDesk(deskFromKey(key));
+    setMode("local desk");
+    audio.play("tape");
+  };
+
+  const useMetaMask = async () => {
+    try {
+      const handle = await connectMetaMask();
+      setDesk({ client: handle.client, address: handle.address, writable: handle.writable });
+      setMode("injected wallet");
+      notify("note", "injected wallet attached", shortDesk(handle.address));
+    } catch (error) {
+      notify("halt", "wallet connect refused", describeFailure(error));
     }
-    sound.whoosh();
-    setDrawerOpen(true);
-  }, [selected, pushToast]);
+  };
 
-  const toggleMute = useCallback(() => {
-    const next = !muted;
-    setMuted(next);
-    sound.setMuted(next);
-    if (!next) sound.click();
-  }, [muted]);
+  const watchAddress = (value: string) => {
+    const handle = watchDesk(value);
+    setDesk(handle);
+    setMode("watch only");
+    notify("note", "watching another desk book", shortDesk(handle.address));
+  };
 
-  const onCreateMarket = useCallback(
-    async (question: string, category: string, primary: string, criteria: string) => {
-      await runWrite(
-        "create",
-        "create_market",
-        (activeClient) => writeTx(activeClient, "create_market", [question, category, primary, criteria]),
-        { successTitle: "Market created", confetti: true },
-      );
-      setCreateOpen(false);
+  const loadFeed = useCallback(
+    async (marketId: string): Promise<{ receipt: ResolutionReceipt; feed: EcosystemFeed }> => {
+      const client = desk.client;
+      const [receipt, feed] = await Promise.all([
+        readContract<ResolutionReceipt>(client, "get_resolution_receipt", [marketId]),
+        readContract<EcosystemFeed>(client, "get_ecosystem_market_feed", [marketId]),
+      ]);
+      return { receipt, feed };
     },
-    [runWrite],
+    [desk],
   );
 
-  const activeBonds = stats?.active_challenge_bonds ?? 0;
-  const provisionalCount = markets.filter((market) => market.challenge_open).length;
-  const lockedPots = markets.reduce((total, market) => total + market.remaining_liability, 0);
-  const marketsPageComplete = markets.length >= (stats?.total_markets ?? 0);
+  const togglingAudio = () => {
+    const next = !silenced;
+    setSilenced(next);
+    audio.setSilent(next);
+    if (!next) audio.play("sweep");
+  };
+
+  const basketCount = hedges.filter((item) => item.state === "LOCKED").length;
 
   return (
     <div className="min-h-screen">
-      <Header
+      <TerminalChrome
         stats={stats}
-        address={address}
-        walletKind={walletKind}
-        muted={muted}
-        onToggleMute={toggleMute}
-        onOpenWallet={() => {
-          sound.click();
-          setTab("wallet");
+        markets={markets}
+        desk={desk.address}
+        mode={mode}
+        silenced={silenced}
+        live={!booting && !errors}
+        onToggleAudio={togglingAudio}
+        onOpenDesk={() => setDeskOpen(true)}
+        onRefresh={() => {
+          audio.play("tape");
+          refresh(desk.client, desk.address).catch((error: unknown) => notify("halt", "reload failed", describeFailure(error)));
         }}
-        onOpenConsensus={openConsensus}
-        loading={loading}
+        onSelect={(id) => {
+          setSelected(id);
+          setWorkspace("books");
+          audio.play("sweep");
+        }}
       />
 
-      <div className="border-b border-line/70 bg-obsidian/60">
-        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center gap-x-5 gap-y-1 px-5 py-2 text-[10px] text-muted">
-          <span className="flex items-center gap-1.5">
-            <Layers3 size={11} className="text-no" />
-            <span className="font-mono">{CONTRACT_ADDRESS.slice(0, 10)}...{CONTRACT_ADDRESS.slice(-6)}</span>
-          </span>
-          <span className="flex items-center gap-1.5">
-            <Building2 size={11} className="text-amber" /> {NETWORK_LABEL} {CHAIN_ID}
-          </span>
-          <span className="flex items-center gap-1.5">
-            <BadgeCheck size={11} className="text-yes" /> privileged roles {stats?.privileged_roles ?? 0}
-          </span>
-          <span className="flex items-center gap-1.5">
-            <Activity size={11} className="text-violet" /> clock step {stats?.clock_step ?? 0}
-          </span>
-          <span className="flex items-center gap-1.5">
-            <ShieldCheck size={11} className={stats?.invariant_ok ? "text-yes" : "text-danger"} />
-            custody {formatExact(stats?.tvl ?? 0)} = pots + bonds {formatExact(activeBonds)}
-          </span>
-          <span className="ml-auto hidden font-mono text-[9px] lg:inline">runner {RUNNER_PIN}</span>
+      <nav className="border-b border-edge bg-panel/50 px-4">
+        <div className="mx-auto flex max-w-[1680px] gap-1">
+          <Tab id="books" icon={LayoutGrid} label="macro orderbook and hedge matrix" active={workspace} onSelect={setWorkspace} />
+          <Tab id="model" icon={LineChart} label="strike quantization and payoff modeler" active={workspace} onSelect={setWorkspace} />
+          <Tab id="telemetry" icon={ScanLine} label="oracle verification and ecosystem feed" active={workspace} onSelect={setWorkspace} />
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              data-testid="listing-open"
+              onClick={() => setListingOpen(true)}
+              className="flex items-center gap-1.5 border border-edge bg-rack px-2.5 py-1.5 font-mono text-[10px] text-dim transition hover:border-amber/45 hover:text-ink"
+            >
+              <ArrowDownLeft size={11} /> list a conditional book
+            </button>
+            <span className="font-mono text-[9px] text-dim">
+              {basketCount} baskets locked · refund floor {pgt(MIN_DEPOSIT_WEI)}
+            </span>
+          </div>
         </div>
-      </div>
+      </nav>
 
-      <main className="mx-auto max-w-[1500px] px-5 py-5">
-        <section className="mb-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_390px]">
-          <div className="animate-rise rounded-xl border border-line bg-gradient-to-br from-panel2/80 via-panel/70 to-obsidian p-5">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="rounded border border-yes/30 bg-yes/10 px-1.5 py-0.5 text-[9px] font-medium tracking-[0.14em] text-yes">
-                LIVE CONSENSUS
-              </span>
-              <span className="rounded border border-line bg-obsidian/60 px-1.5 py-0.5 text-[9px] tracking-[0.14em] text-muted">
-                FUNDED CUSTODY
-              </span>
-              <span className="rounded border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] tracking-[0.14em] text-amber">
-                CHALLENGE WINDOW
-              </span>
-            </div>
-            <h2 className="max-w-[640px] text-[19px] font-semibold leading-tight tracking-tight text-ink">
-              Conditional macro and tech markets, adjudicated by validators instead of an admin key.
-            </h2>
-            <p className="mt-1.5 max-w-[620px] text-[11px] leading-relaxed text-muted">
-              Evidence is fetched live, sanitized, and compared by an equivalence principle that must agree exactly
-              on the outcome band, the confidence anchor and source authenticity. Every pool unit sits in a custody
-              vault until the challenge window closes.
-            </p>
-            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <HeroStat label="Custody TVL" value={`${formatToken(stats?.tvl ?? 0)}`} suffix="PGT" tone="text-yes" />
-              <HeroStat label="Volume" value={`${formatToken(stats?.total_volume ?? 0)}`} tone="text-ink" />
-              <HeroStat label="Paid out" value={`${formatToken(stats?.total_paid_out ?? 0)}`} tone="text-violet" />
-              <HeroStat label="Open windows" value={`${provisionalCount}`} tone="text-amber" />
-            </div>
+      <main className="mx-auto max-w-[1680px] space-y-3 px-4 py-3">
+        {errors ? (
+          <div className="border border-ask/40 bg-ask/10 px-3 py-2 font-mono text-[10px] text-ask">
+            the terminal could not read the deployment: {errors}
           </div>
+        ) : null}
 
-          <div className="animate-rise rounded-xl border border-line bg-panel/70 p-4">
-            <div className="flex items-center justify-between">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-muted">custody invariant</div>
-              <span
-                className={`rounded px-1.5 py-0.5 font-mono text-[9px] ${
-                  stats?.invariant_ok ? "bg-yes/10 text-yes" : "bg-danger/10 text-danger"
-                }`}
-                data-testid="invariant-badge"
-              >
-                {stats?.invariant_ok ? "OK" : "CHECK"}
-              </span>
-            </div>
-            <div className="mt-3 space-y-2 text-[10px]">
-              <InvariantRow label="vault custody" value={formatExact(stats?.tvl ?? 0)} tone="text-ink" />
-              <InvariantRow
-                label="locked market pots"
-                value={`${formatExact(lockedPots)}${marketsPageComplete ? "" : "+"}`}
-                tone="text-yes"
-              />
-              <InvariantRow label="active challenge bonds" value={formatExact(activeBonds)} tone="text-amber" />
-              <div className="border-t border-line/70 pt-2">
-                <InvariantRow
-                  label="sum check"
-                  value={stats?.invariant_ok ? "balanced" : "mismatch"}
-                  tone={stats?.invariant_ok ? "text-yes" : "text-danger"}
-                />
-              </div>
-            </div>
-            <div className="mt-3 rounded border border-line/70 bg-obsidian/50 p-2 font-mono text-[9px] leading-relaxed text-muted">
-              vault == pots + bonds
-              <br />
-              no owner, no admin, no emergency settle
-            </div>
-          </div>
-        </section>
-
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
-          <section>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <h3 className="text-[12px] font-medium uppercase tracking-[0.16em] text-ink">Markets</h3>
-              <span className="rounded border border-line bg-panel/60 px-1.5 py-0.5 font-mono text-[9px] text-muted">
-                {markets.length} loaded
-              </span>
-              <div className="ml-2 flex gap-1">
-                {(["ALL", "OPEN", "PROVISIONAL", "FINALIZED"] as Filter[]).map((option) => (
-                  <button
-                    key={option}
-                    onClick={() => {
-                      sound.click();
-                      setFilter(option);
-                    }}
-                    className={`rounded border px-1.5 py-1 text-[9px] tracking-[0.08em] transition ${
-                      filter === option
-                        ? "border-yes/40 bg-yes/10 text-yes"
-                        : "border-line bg-panel/50 text-muted hover:text-ink"
-                    }`}
-                  >
-                    {option}
-                  </button>
-                ))}
-              </div>
-              <div className="ml-auto flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    sound.click();
-                    void refresh();
-                  }}
-                  className="rounded-lg border border-line bg-panel/60 p-1.5 text-muted transition hover:text-ink"
-                  aria-label="Refresh markets"
-                >
-                  <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
-                </button>
-                <button
-                  onClick={() => {
-                    sound.click();
-                    setCreateOpen(true);
-                  }}
-                  data-testid="new-market-button"
-                  className="flex items-center gap-1.5 rounded-lg border border-yes/35 bg-yes/10 px-2.5 py-1.5 text-[10.5px] font-medium text-yes transition hover:bg-yes/20"
-                >
-                  <Plus size={12} /> New market
-                </button>
-              </div>
-            </div>
-
-            {filtered.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-line bg-panel/40 p-8 text-center">
-                <p className="text-[11px] text-muted">No markets in this filter yet.</p>
-              </div>
-            ) : (
-              <div className="grid gap-3 md:grid-cols-2">
-                {filtered.map((market) => (
-                  <MarketCard
-                    key={market.market_id}
-                    market={market}
-                    selected={market.market_id === selectedId}
-                    onSelect={() => {
-                      sound.click();
-                      setSelectedId(market.market_id);
-                    }}
-                    onInspect={() => {
-                      setSelectedId(market.market_id);
-                      sound.whoosh();
-                      setDrawerOpen(true);
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-
-            <div className="mt-4 grid gap-3 sm:grid-cols-3">
-              <InfoTile
-                title="Live resolution"
-                body="resolve_market_live renders both sources, sanitizes them, and asks validators to agree on the band."
-                tone="border-yes/25"
-              />
-              <InfoTile
-                title="Challenge and re-audit"
-                body="A bonded challenge opens a second live audit. The pot and bond stay locked in custody until settlement."
-                tone="border-amber/25"
-              />
-              <InfoTile
-                title="Exact payouts"
-                body="Pro rata payouts conserve rounding dust to the last claimant, so sum(payouts) equals the pot."
-                tone="border-no/25"
-              />
-            </div>
-          </section>
-
-          <aside className="xl:sticky xl:top-[84px] xl:self-start">
-            <div className="mb-3 grid grid-cols-4 gap-1 rounded-lg border border-line bg-panel/70 p-1">
-              {TAB_META.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => {
-                      sound.click();
-                      setTab(item.id);
-                    }}
-                    data-testid={`tab-${item.id}`}
-                    className={`flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-[10px] transition ${
-                      tab === item.id ? "bg-panel2 text-ink ring-1 ring-inset ring-line" : "text-muted hover:text-ink"
-                    }`}
-                  >
-                    <Icon size={11} />
-                    {item.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {tab === "market" ? (
-              <MarketDetail
-                market={selected}
-                position={position}
+        {workspace === "books" ? (
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
+            <OrderbookMatrix
+              markets={markets}
+              selected={active?.market_id ?? null}
+              positions={positions}
+              hedges={hedges}
+              busy={busy}
+              onSelect={(id) => {
+                setSelected(id);
+                audio.play("tape");
+              }}
+              onReleaseHedge={onReleaseHedge}
+              onOpenWorkspace={() => setWorkspace("model")}
+            />
+            <div className="space-y-3">
+              <LegTicket
+                market={active}
+                book={book}
                 busy={busy}
-                onBuy={(side, amount) =>
-                  selected &&
-                  void runWrite("buy", "buy_outcome_shares", (activeClient) =>
-                    writeTx(activeClient, "buy_outcome_shares", [selected.market_id, side, amount]),
-                  )
-                }
-                onClaim={() =>
-                  selected &&
-                  void runWrite(
-                    "claim",
-                    "claim_market_payout",
-                    (activeClient) => writeTx(activeClient, "claim_market_payout", [selected.market_id]),
-                    { confetti: true, successTitle: "Payout claimed" },
-                  )
-                }
-                onChallenge={(url) =>
-                  selected &&
-                  void runWrite("challenge", "file_resolution_challenge", (activeClient) =>
-                    writeTx(activeClient, "file_resolution_challenge", [selected.market_id, url]),
-                  )
-                }
-                onAudit={() =>
-                  selected &&
-                  void runWrite("audit", "audit_resolution_challenge", (activeClient) =>
-                    writeTx(activeClient, "audit_resolution_challenge", [selected.market_id]),
-                  )
-                }
-                onResolve={(url) =>
-                  selected &&
-                  void runWrite("resolve", "resolve_market_live", (activeClient) =>
-                    writeTx(activeClient, "resolve_market_live", [selected.market_id, url]),
-                  )
-                }
-                onFinalize={() =>
-                  selected &&
-                  void runWrite("finalize", "finalize_market_settlement", (activeClient) =>
-                    writeTx(activeClient, "finalize_market_settlement", [selected.market_id]),
-                  )
-                }
-                onTick={() =>
-                  void runWrite("tick", "advance_market_clock", (activeClient) =>
-                    writeTx(activeClient, "advance_market_clock", [1]),
-                  )
-                }
-                onInspect={openConsensus}
+                writable={desk.writable && mode !== "watch only"}
+                onStake={onStake}
+                onResolve={onResolve}
+                onChallenge={onChallenge}
+                onAudit={onAudit}
+                onFinalize={onFinalize}
+                onClaim={onClaim}
+                onRefund={onRefund}
+                onSweepRefund={onSweepRefund}
+                onOpenTelemetry={() => {
+                  setTelemetryOpen(true);
+                  audio.play("print");
+                }}
               />
-            ) : null}
+              <SolvencyBoard stats={stats} custody={custody} />
+            </div>
+          </div>
+        ) : null}
 
-            {tab === "whatif" ? <Simulator key={selected?.market_id ?? "none"} market={selected} /> : null}
+        {workspace === "model" ? (
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+            <PayoffCurveModeler market={active} />
+            <BasketComposer
+              markets={markets}
+              book={book}
+              busy={busy}
+              writable={desk.writable && mode !== "watch only"}
+              onOpen={(primary, hedge, sideA, sideB, units, native) =>
+                native
+                  ? run("native basket", "open_conditional_hedge_payable", [primary, hedge, sideA, sideB],
+                      BigInt(units) * BigInt(UNIT))
+                  : run("basket reserved", "open_conditional_hedge_basket", [
+                      primary,
+                      hedge,
+                      sideA,
+                      sideB,
+                      BigInt(units) * BigInt(UNIT),
+                    ])
+              }
+              hedges={hedges}
+              onRelease={onReleaseHedge}
+            />
+          </div>
+        ) : null}
 
-            {tab === "guards" ? (
-              <GuardLab
+        {workspace === "telemetry" ? (
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="space-y-3">
+              <SolvencyBoard stats={stats} custody={custody} />
+              <OrderbookMatrix
                 markets={markets}
-                positions={portfolio?.positions ?? []}
-                address={address}
+                selected={active?.market_id ?? null}
+                positions={positions}
+                hedges={hedges}
                 busy={busy}
-                onProbe={probeGuard}
+                onSelect={(id) => setSelected(id)}
+                onReleaseHedge={onReleaseHedge}
+                onOpenWorkspace={() => setTelemetryOpen(true)}
               />
-            ) : null}
+            </div>
+            <div className="rail px-3 py-3">
+              <div className="flex items-center gap-2">
+                <BookOpenCheck size={13} className="text-cyan" />
+                <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-ink">
+                  verified settlement receipts on this desk session
+                </span>
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {transactions.length === 0 ? (
+                  <p className="font-mono text-[10px] text-dim">
+                    nothing signed yet. Open the desk session panel to attach a signing key, then trigger a leg, an
+                    adjudication or a refund and the receipt lands here.
+                  </p>
+                ) : null}
+                {transactions.map((item) => (
+                  <div key={item.id} className="border border-edge bg-rack px-2.5 py-2 font-mono text-[10px]">
+                    <div className="flex items-center gap-2">
+                      <span className="text-ink">{item.label}</span>
+                      <span className={item.execution === "SUCCESS" ? "text-bid" : "text-ask"}>
+                        {item.execution ?? "pending"}
+                      </span>
+                      <a
+                        href={`${EXPLORER_URL}/transactions/${item.hash}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ml-auto text-dim hover:text-cyan"
+                      >
+                        {item.hash.slice(0, 16)}...
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button
+                data-testid="telemetry-open"
+                onClick={() => setTelemetryOpen(true)}
+                className="mt-3 w-full border border-amber/40 bg-amber/10 py-2 font-mono text-[10px] text-amber transition hover:bg-amber/20"
+              >
+                open the full dual source telemetry for PG:{active?.market_id ?? "-"}
+              </button>
+            </div>
+          </div>
+        ) : null}
 
-            {tab === "wallet" ? (
-              <WalletPanel
-                address={address}
-                kind={walletKind}
-                slot={slot}
-                portfolio={portfolio}
-                busy={busy}
-                transactions={txs}
-                onSwitchSlot={switchSlot}
-                onMint={() =>
-                  void runWrite("mint", "faucet_or_deposit", (activeClient) => writeTx(activeClient, "faucet_or_deposit", [1000]), {
-                    successTitle: "1000 PGT minted",
-                  })
-                }
-                onConnectMetaMask={() => void handleMetaMask()}
-                onRefresh={() => void refresh()}
-              />
-            ) : null}
-          </aside>
-        </div>
+        <footer className="flex flex-wrap items-center gap-3 border-t border-edge px-1 py-3 font-mono text-[9px] text-dim">
+          <span className="text-ink">PROPHETGRID FLAGSHIP v1</span>
+          <span>{NETWORK_LABEL} chain 61999</span>
+          <a href={REPO_URL} target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:text-ink">
+            <Github size={10} /> source
+          </a>
+          <a href={EXPLORER_URL} target="_blank" rel="noreferrer" className="hover:text-ink">
+            contract {CONTRACT_ADDRESS.slice(0, 12)}...
+          </a>
+          <a href="./demo-video-subtitled.mp4" target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:text-ink">
+            <Video size={10} /> subtitled demo reel
+          </a>
+          <span className="ml-auto">
+            settlement authority: live validator consensus. No admin key, no manual clock.
+          </span>
+        </footer>
       </main>
 
-      <footer className="mt-6 border-t border-line/70 bg-obsidian/70">
-        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center gap-x-5 gap-y-1 px-5 py-4 text-[9.5px] text-muted">
-          <span className="font-mono">{CONTRACT_ADDRESS}</span>
-          <a href={EXPLORER_URL} target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:text-ink">
-            explorer <ArrowUpRight size={9} />
-          </a>
-          <a href={REPO_URL} target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:text-ink">
-            source <ArrowUpRight size={9} />
-          </a>
-          <span className="font-mono">runner {RUNNER_PIN}</span>
-          <span className="ml-auto font-mono">sha256 identity verified on chain</span>
-        </div>
-      </footer>
-
-      <ConsensusDrawer open={drawerOpen} market={selected} onClose={() => setDrawerOpen(false)} loadReceipt={loadReceipt} />
-      <CreateMarketModal
-        open={createOpen}
-        busy={busy === "create"}
-        onClose={() => setCreateOpen(false)}
-        onCreate={(question, category, primary, criteria) => void onCreateMarket(question, category, primary, criteria)}
+      <DeskRegistry
+        open={deskOpen}
+        onClose={() => setDeskOpen(false)}
+        address={desk.address}
+        mode={mode}
+        slot={deskSlot()}
+        book={book}
+        busy={busy}
+        transactions={transactions}
+        onSlot={switchSlot}
+        onMetaMask={useMetaMask}
+        onWatch={watchAddress}
+        onDeposit={onDeposit}
+        onSweepRefund={onSweepRefund}
+        onTransfer={onTransfer}
       />
-      <Toasts items={toasts} onDismiss={(id) => setToasts((current) => current.filter((item) => item.id !== id))} />
+
+      <ListingConsole
+        open={listingOpen}
+        busy={busy !== null}
+        writable={desk.writable && mode !== "watch only"}
+        onClose={() => setListingOpen(false)}
+        onCreate={onCreate}
+      />
+
+      <OracleTelemetry
+        open={telemetryOpen}
+        market={active}
+        policy={policy}
+        onClose={() => setTelemetryOpen(false)}
+        loadFeed={loadFeed}
+      />
+
+      <SignalStrip items={signals} onDismiss={(id) => setSignals((current) => current.filter((item) => item.id !== id))} />
+
+      {busy ? (
+        <div className="fixed bottom-3 left-3 z-[68] flex items-center gap-2 border border-amber/40 bg-panel px-3 py-2 font-mono text-[10px] text-amber">
+          <Loader size={12} className="animate-spin" /> {busy} · waiting for validator consensus
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function HeroStat({ label, value, suffix, tone }: { label: string; value: string; suffix?: string; tone: string }) {
+function Tab({
+  id,
+  icon: Icon,
+  label,
+  active,
+  onSelect,
+}: {
+  id: Workspace;
+  icon: typeof LayoutGrid;
+  label: string;
+  active: Workspace;
+  onSelect: (value: Workspace) => void;
+}) {
+  const on = active === id;
   return (
-    <div className="rounded-lg border border-line bg-obsidian/50 px-2.5 py-2">
-      <div className="text-[8.5px] uppercase tracking-[0.16em] text-muted">{label}</div>
-      <div className={`font-mono text-[13px] ${tone}`}>
-        {value}
-        {suffix ? <span className="ml-1 text-[9px] text-muted">{suffix}</span> : null}
-      </div>
+    <button
+      data-testid={`tab-${id}`}
+      onClick={() => {
+        onSelect(id);
+        audio.play("tape");
+      }}
+      className={`flex items-center gap-1.5 border-b-2 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.14em] transition ${
+        on ? "border-amber text-amber" : "border-transparent text-dim hover:text-ink"
+      }`}
+    >
+      <Icon size={11} />
+      {label}
+    </button>
+  );
+}
+
+function BasketComposer({
+  markets,
+  book,
+  hedges,
+  busy,
+  writable,
+  onOpen,
+  onRelease,
+}: {
+  markets: SettlementSnapshot[];
+  book: DeskBook | null;
+  hedges: HedgeRow[];
+  busy: string | null;
+  writable: boolean;
+  onOpen: (
+    primary: string,
+    hedge: string,
+    sideA: "YES" | "NO",
+    sideB: "YES" | "NO",
+    units: number,
+    native: boolean,
+  ) => void;
+  onRelease: (hedge: HedgeRow) => void;
+}) {
+  const [primary, setPrimary] = useState(markets[0]?.market_id ?? "1");
+  const [hedge, setHedge] = useState(markets[1]?.market_id ?? "2");
+  const [sideA, setSideA] = useState<"YES" | "NO">("YES");
+  const [units, setUnits] = useState(40);
+  const [native, setNative] = useState(false);
+
+  const pair = markets.find((row) => row.market_id === primary);
+  const leg = markets.find((row) => row.market_id === hedge);
+  const reservation = BigInt(units) * BigInt(UNIT);
+  const collateral = Number(((reservation - BigInt(CHALLENGE_BOND_WEI)) * 10000n) / 12500n);
+  const weightA = pair
+    ? pair.mode === "PAYOUT"
+      ? sideA === "YES"
+        ? pair.yes_payout_bps
+        : pair.no_payout_bps
+      : 10000
+    : undefined;
+  const affordable = (book?.balance_pgt ?? 0) >= Number(reservation);
+  const ready = Boolean(pair && leg && pair.market_id !== leg.market_id) && writable && (native || affordable);
+
+  return (
+    <div className="space-y-3">
+      <section className="rail px-3 py-3" data-testid="basket-composer">
+        <div className="flex items-center gap-2">
+          <LayoutGrid size={13} className="text-lime" />
+          <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-ink">
+            cross-market conditional hedge composer
+          </span>
+        </div>
+        <p className="mt-1.5 font-mono text-[9px] leading-relaxed text-dim">
+          A basket pairs opposite legs across two correlated books. The desk locks the reservation, and the release
+          pays the better weighted leg: the shortfall is absorbed by the protocol fee reserve, never by another desk.
+        </p>
+
+        <div className="mt-2.5 grid gap-2 md:grid-cols-2">
+          <Selector label="primary book" value={primary} onChange={setPrimary} markets={markets} />
+          <Selector label="hedge book" value={hedge} onChange={setHedge} markets={markets} />
+        </div>
+
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <span className="grid-label">leg direction</span>
+          {(["YES", "NO"] as const).map((option) => (
+            <button
+              key={option}
+              onClick={() => {
+                setSideA(option);
+                audio.play("tape");
+              }}
+              className={`border px-2 py-[2px] font-mono text-[10px] transition ${
+                sideA === option
+                  ? option === "YES"
+                    ? "border-bid/50 bg-bid/10 text-bid"
+                    : "border-cyan/50 bg-cyan/10 text-cyan"
+                  : "border-edge text-dim hover:text-ink"
+              }`}
+            >
+              primary {option} vs hedge {option === "YES" ? "NO" : "YES"}
+            </button>
+          ))}
+          <label className="ml-auto flex items-center gap-1.5 font-mono text-[10px] text-dim">
+            <input
+              type="checkbox"
+              checked={native}
+              onChange={(event) => setNative(event.target.checked)}
+              className="accent-[#10B981]"
+            />
+            fund with native deposit
+          </label>
+        </div>
+
+        <div className="mt-2.5">
+          <div className="flex items-baseline justify-between">
+            <span className="grid-label">reservation</span>
+            <span className="font-mono text-[11px] text-ink">{units} units</span>
+          </div>
+          <input
+            type="range"
+            min={12}
+            max={80}
+            value={units}
+            data-testid="basket-units"
+            onChange={(event) => setUnits(Number(event.target.value))}
+            className="mt-1 w-full"
+          />
+          <div className="mt-1.5 grid grid-cols-3 gap-px bg-edge/70">
+            <Mini label="reservation" value={pgt(reservation)} />
+            <Mini label="collateral" value={pgt(collateral)} />
+            <Mini label="bounty headroom" value={pgt(Number(reservation) - collateral)} />
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-2 font-mono text-[9px] text-dim">
+            <span>
+              primary weight {pair ? `${pair.yes_payout_bps || 10000} bps` : "unsettled"} ·{" "}
+              {weightA === undefined ? "modelled at full principal" : `${weightA} bps`}
+            </span>
+            <span>hedge weight {leg ? `${leg.no_payout_bps || 10000} bps` : "unsettled"}</span>
+            <span className={affordable || native ? "text-bid" : "text-ask"}>
+              {native ? "native funded" : affordable ? "collateral available" : "insufficient collateral"}
+            </span>
+          </div>
+          <button
+            data-testid="basket-open"
+            disabled={!ready || busy !== null}
+            onClick={() => onOpen(primary, hedge, sideA, sideA === "YES" ? "NO" : "YES", units, native)}
+            className="mt-2 w-full border border-lime/45 bg-lime/10 py-2 font-mono text-[10px] text-lime transition enabled:hover:bg-lime/20 disabled:opacity-40"
+          >
+            reserve the basket
+          </button>
+        </div>
+      </section>
+
+      <section className="rail px-3 py-3">
+        <span className="grid-label">basket register on this desk</span>
+        <div className="mt-1.5 space-y-1.5">
+          {hedges.length === 0 ? (
+            <p className="font-mono text-[10px] text-dim">no baskets reserved</p>
+          ) : null}
+          {hedges.map((item) => (
+            <div key={item.hedge_id} className="border border-edge bg-rack px-2.5 py-2 font-mono text-[10px]">
+              <div className="flex items-center gap-2">
+                <span className="text-ink">BASKET {item.hedge_id}</span>
+                <span className={item.state === "LOCKED" ? "text-amber" : "text-bid"}>{item.state}</span>
+                <span className="ml-auto text-dim">
+                  {pgt(item.paid)} paid · {pgt(item.reservation)} reserved
+                </span>
+              </div>
+              <div className="mt-1 text-dim">
+                PG:{item.primary_market_id} {item.primary_side} x PG:{item.hedge_market_id} {item.hedge_side} ·
+                weights {item.primary_weight_bps}+{item.hedge_weight_bps}
+              </div>
+              {item.state === "LOCKED" ? (
+                <button
+                  onClick={() => onRelease(item)}
+                  disabled={busy !== null}
+                  className="mt-1.5 w-full border border-lime/40 bg-lime/10 py-1 font-mono text-[9px] text-lime transition enabled:hover:bg-lime/20 disabled:opacity-40"
+                >
+                  release at epoch {item.unlock_epoch}
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
 
-function InvariantRow({ label, value, tone }: { label: string; value: string; tone: string }) {
+function Selector({
+  label,
+  value,
+  markets,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  markets: SettlementSnapshot[];
+  onChange: (value: string) => void;
+}) {
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-muted">{label}</span>
-      <span className={`font-mono ${tone}`}>{value}</span>
-    </div>
+    <label className="block">
+      <span className="grid-label">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 w-full border border-edge bg-rack px-2 py-1.5 font-mono text-[10px] text-ink outline-none focus:border-lime/45"
+      >
+        {markets.map((row) => (
+          <option key={row.market_id} value={row.market_id}>
+            PG:{row.market_id} {row.category} · strike {row.strike_bps} · pot {pgt(row.pot)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
-function InfoTile({ title, body, tone }: { title: string; body: string; tone: string }) {
+function Mini({ label, value }: { label: string; value: string }) {
   return (
-    <div className={`rounded-lg border ${tone} bg-panel/60 p-3`}>
-      <div className="text-[10px] font-medium text-ink">{title}</div>
-      <p className="mt-1 text-[9.5px] leading-relaxed text-muted">{body}</p>
+    <div className="bg-carbon px-2 py-1.5">
+      <div className="grid-label">{label}</div>
+      <div className="font-mono text-[11px] text-ink">{value}</div>
     </div>
   );
 }

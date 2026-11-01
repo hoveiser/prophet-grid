@@ -4,7 +4,7 @@
 The token is read from .env and injected into a git credential helper through
 the environment only. It is never written to disk and never printed.
 
-Steps: create the public repo if needed, commit, tag studionet-v1, push main,
+Steps: create the public repo if needed, commit, tag the release, push main,
 push frontend/dist to gh-pages, enable Pages and verify the live URL.
 """
 
@@ -31,6 +31,7 @@ HELPER = ROOT / "tools" / "git-credential-helper.sh"
 DIST = ROOT / "frontend" / "dist"
 PAGES_WORKTREE = ROOT / "artifacts" / "gh-pages"
 REPORT = ROOT / "evidence" / "publish_report.json"
+RELEASE_TAG = os.environ.get("RELEASE_TAG", "milestone-v1")
 COMMIT_NAME = "hoveiser"
 COMMIT_EMAIL = "hoveiser@users.noreply.github.com"
 
@@ -166,14 +167,14 @@ def commit_and_push(token: str) -> tuple[str, str]:
         raise RuntimeError(f"main push failed: {stderr[:600]}")
     log("main pushed")
 
-    tags = run(["git", "tag", "--list", "studionet-v1"], token).stdout.strip()
+    tags = run(["git", "tag", "--list", RELEASE_TAG], token).stdout.strip()
     if not tags:
-        git("tag", "-a", "studionet-v1", "-m", "ProphetGrid studionet deployment v1", token=token)
-    push_tag = git("push", "origin", "studionet-v1", token=token, check=False)
+        git("tag", "-a", RELEASE_TAG, "-m", f"ProphetGrid {RELEASE_TAG} deployment", token=token)
+    push_tag = git("push", "origin", RELEASE_TAG, token=token, check=False)
     if push_tag.returncode != 0:
         stderr = (push_tag.stderr or "").replace(token, "***")
         raise RuntimeError(f"tag push failed: {stderr[:600]}")
-    log("tag studionet-v1 pushed")
+    log(f"tag {RELEASE_TAG} pushed")
     return head, branch
 
 
@@ -298,7 +299,7 @@ def main() -> int:
         "repository": f"https://github.com/{OWNER}/{REPO}",
         "branch": branch,
         "commit": head,
-        "tag": "studionet-v1",
+        "tag": RELEASE_TAG,
         "pages_branch": pages_branch,
         "pages_status": pages.get("status"),
         "pages_url": PAGES_URL,

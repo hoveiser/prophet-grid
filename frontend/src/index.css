@@ -13,85 +13,91 @@ body,
 }
 
 body {
-  @apply bg-obsidian text-ink antialiased;
+  @apply bg-carbon font-display text-ink antialiased;
   background-image:
-    radial-gradient(900px 520px at 12% -10%, rgba(52, 211, 153, 0.08), transparent 62%),
-    radial-gradient(820px 440px at 88% -4%, rgba(34, 211, 238, 0.07), transparent 60%),
-    linear-gradient(rgba(27, 39, 64, 0.28) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(27, 39, 64, 0.28) 1px, transparent 1px);
-  background-size: auto, auto, 34px 34px, 34px 34px;
+    linear-gradient(rgba(27, 36, 54, 0.55) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27, 36, 54, 0.42) 1px, transparent 1px),
+    radial-gradient(720px 420px at 8% -8%, rgba(255, 149, 0, 0.07), transparent 60%),
+    radial-gradient(680px 380px at 92% -6%, rgba(0, 229, 255, 0.06), transparent 58%);
+  background-size: 100% 30px, 30px 100%, auto, auto;
   background-attachment: fixed;
 }
 
 ::selection {
-  background: rgba(52, 211, 153, 0.28);
-  color: #e6edf7;
+  background: rgba(255, 149, 0, 0.3);
+  color: #06080d;
 }
 
 *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
 }
 *::-webkit-scrollbar-track {
-  background: #070b14;
+  background: #06080d;
 }
 *::-webkit-scrollbar-thumb {
-  background: #1b2740;
-  border-radius: 999px;
+  background: #1b2436;
+  border-radius: 2px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: #2a3b5c;
+  background: #2a3852;
 }
 
-.slider {
+input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
-  width: 100%;
   height: 4px;
-  border-radius: 999px;
-  background: #16213a;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #ff9500 0%, #00e5ff 100%);
   outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  background: #e8edf5;
+  border: 1px solid #06080d;
   cursor: pointer;
 }
 
-.slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  background: #34d399;
-  border: 2px solid #070b14;
-  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.55);
+input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  background: #e8edf5;
+  border: 1px solid #06080d;
+  cursor: pointer;
 }
 
-.slider::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  background: #34d399;
-  border: 2px solid #070b14;
-  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.55);
+.grid-label {
+  @apply font-mono text-[9px] uppercase tracking-[0.22em] text-dim;
 }
 
-.slider-no::-webkit-slider-thumb {
-  background: #22d3ee;
-  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.55);
-}
-.slider-no::-moz-range-thumb {
-  background: #22d3ee;
-  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.55);
+.rail {
+  @apply border border-edge bg-panel/80 shadow-rail;
 }
 
-.slider-amber::-webkit-slider-thumb {
-  background: #fbbf24;
-  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.55);
-}
-.slider-amber::-moz-range-thumb {
-  background: #fbbf24;
-  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.55);
+.cell {
+  @apply font-mono text-[11px] tabular-nums;
 }
 
-.tabular {
-  font-variant-numeric: tabular-nums;
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(220%);
+  }
+}
+
+.scanline::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent, rgba(255, 149, 0, 0.06), transparent);
+  animation: scanline 5.5s linear infinite;
+  pointer-events: none;
 }
